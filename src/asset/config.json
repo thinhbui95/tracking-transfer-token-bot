@@ -1,0 +1,17 @@
+{
+  "BSC Mainnet": {
+    "name": "BSC Mainnet",
+    "url": "wss://bsc-rpc.publicnode.com",
+    "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
+  },
+  "VICTION": {
+    "name": "VICTION",
+    "url": "wss://viction.drpc.org",
+    "address": "0xcca4e6302510d555b654b3eab9c0fcb223bcfdf0"
+  },
+  "ETHEREUM": {
+    "name": "ETHEREUM",
+    "url": "wss://ethereum-rpc.publicnode.com",
+    "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+  }
+}
