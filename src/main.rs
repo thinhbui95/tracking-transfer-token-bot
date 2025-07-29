@@ -57,7 +57,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-pub mod get_event {
+mod get_event {
     use std::sync::Arc;
     use ethers::{abi::AbiDecode, providers::Middleware};
     
@@ -149,7 +149,7 @@ mod get_config {
     }
 }
 
-pub mod send_message_to_telegram {
+mod send_message_to_telegram {
     use teloxide::Bot;
     use teloxide::requests::Requester;
     use std::env;
