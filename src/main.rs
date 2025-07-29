@@ -1,6 +1,6 @@
 use ethers::prelude::*;
 use ethers_providers::Ws;
-use ethers::core::types::{ Filter, U256};
+use ethers::core::types::{ Filter, U256, Address};
 use tokio::sync::mpsc;
 use std::time::Duration;
 use tokio::select;
@@ -17,7 +17,6 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    print!("Available configurations:\n");
     // Spawn producer
     for (_key, entry) in configs {
         let tx = tx.clone();
@@ -35,13 +34,13 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let message = send_message_to_telegram::Message {
-                from: event.from.to_string(),
-                to: event.to.to_string(),
+                from: event.from,
+                to: event.to,
                 value: event.value,
-                tx_hash: event.tx_hash.to_string(),
+                tx_hash: event.tx_hash,
             };
-            // Send message to Telegram
 
+             // Call the send_message function
             if let Err(e) = send_message_to_telegram::send_message(&message).await {
                 println!("Error sending message: {}", e);
             }
@@ -55,9 +54,6 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Ctrl+C pressed, shutting down...");
                 return Ok(());
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                // You can put periodic work here if needed
-            }
         }
     }
 }
@@ -67,7 +63,7 @@ pub mod get_event {
     use ethers::{abi::AbiDecode, providers::Middleware};
     
     use super::*;
-
+    #[derive(Debug)]
     pub struct TransferEvent {
         pub from: Address,
         pub to: Address,
@@ -94,8 +90,8 @@ pub mod get_event {
             .unwrap();
         while let Some(log) = stream.next().await {
             // topics[0] is the event signature, topics[1] is from, topics[2] is to
-            let from: Address = H256::from(log.topics[1]).into();
-            let to: Address = H256::from(log.topics[2]).into();
+            let from: Address = Address::from(log.topics[1]);
+            let to: Address = Address::from(log.topics[2]);
             let value: U256 = U256::decode(log.data.as_ref()).unwrap();
             let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
 
@@ -129,6 +125,7 @@ mod get_config {
 
     impl Config {
         // Add a new config entry to config.json
+        #[allow(dead_code)]
         pub fn add_config_to_file(key: String, config: Config) -> Result<(), Box<dyn std::error::Error>> {
             let path = "src/asset/config.json";
             // Load existing configs
@@ -154,18 +151,18 @@ mod get_config {
 }
 
 pub mod send_message_to_telegram {
-    use telebot::Bot;
-    use telebot::functions::*;
+    use teloxide::Bot;
+    use teloxide::requests::Requester;
     use std::env;
     use dotenv::from_path;
     use super::*;
 
     #[derive(Debug)]
     pub struct Message {
-        pub from: String,
-        pub to: String,
+        pub from: Address,
+        pub to: Address,
         pub value: U256,
-        pub tx_hash: String,
+        pub tx_hash: H256,
     }
 
 
@@ -176,43 +173,27 @@ pub mod send_message_to_telegram {
             return Err("TELEGRAM_BOT_KEY is not set".into());
         }
 
-        // Get chat_id from environment variable or config
-        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-            .ok()
-            .and_then(|id| id.parse().ok())
-            .unwrap_or(1234); // fallback to 1234 if not set
+        // Get chat ID
+        let chat_id: i64 = env::var("TELEGRAM_CHAT_ID")
+            .map_err(|_| "TELEGRAM_CHAT_ID environment variable is not set")?
+            .parse()
+            .map_err(|_| "TELEGRAM_CHAT_ID is not a valid i64")?;
 
         let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap());
 
-        let _ = bot.request.message(
-            chat_id,
+        // Send the message
+        bot.send_message(
+            teloxide::types::ChatId(chat_id),
             format!(
-                "Transfer Event:\nFrom: {}\nTo: {}\nValue: {}\nTransaction Hash: {}",
-                message.from, message.to, message.value, message.tx_hash
+                "Transfer Event:\nFrom: {:#x}\nTo: {:#x}\nValue: {}\nTransaction Hash: {:#x}",
+                message.from,
+                message.to,
+                message.value,
+                message.tx_hash
             ),
         )
-        .send();
+        .await
+        .map_err(|e| format!("Failed to send message: {}", e))?;
         Ok(())
     }
-
-    // pub fn example_send(message: &str)-> Result<(), Box<dyn std::error::Error>> {
-    //       from_path("src/asset/.env").ok();
-       
-    //     if std::env::var("TELEGRAM_BOT_KEY").is_err() {
-    //         return Err("TELEGRAM_BOT_KEY is not set".into());
-    //     }
-
-    //     // Get chat_id from environment variable or config
-    //     let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-    //         .ok()
-    //         .and_then(|id| id.parse().ok())
-    //         .unwrap_or(1234); // fallback to 1234 if not set
-
-    //     let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap());
-
-    //     // Send the message
-    // let _ = bot.request.message(chat_id, format!("Example Message: {}", message))
-    //     .send();
-    // Ok(())
-    // }
 }
