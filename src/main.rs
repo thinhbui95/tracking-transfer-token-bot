@@ -1,14 +1,10 @@
 use ethers::prelude::*;
 use ethers_providers::Ws;
 use ethers::core::types::{ Filter, U256};
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio::task;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::signal::ctrl_c;
-use dotenv::from_path;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +26,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = entry.name.clone();
         tokio::spawn(async move {
             if let Err(e) = get_event::get_transfer_events(&rpc_url, &contract_address, tx).await {
-                eprintln!("Error fetching events for {}: {}", name, e);
+                println!("Error fetching events for {}: {}", name, e);
             }
         });
     }
@@ -45,24 +41,17 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tx_hash: event.tx_hash.to_string(),
             };
             // Send message to Telegram
-            if let Err(e) = send_message_to_telegram::send_message(1234, &message).await {
-                eprintln!("Error sending message: {}", e);
-            } else {
-                println!("Message sent: {:?}", message);
+
+            if let Err(e) = send_message_to_telegram::send_message(&message).await {
+                println!("Error sending message: {}", e);
             }
         }
 
     });
 
-
-    // Example: handle received events (optional)
-    // while let Some(event) = rx.recv().await {
-    //     println!("Received event: {:?}", event);
-    // }
-
-      loop {
+    loop {
         select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = ctrl_c() => {
                 println!("Ctrl+C pressed, shutting down...");
                 return Ok(());
             }
@@ -72,6 +61,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
 pub mod get_event {
     use std::sync::Arc;
     use ethers::{abi::AbiDecode, providers::Middleware};
@@ -179,27 +169,50 @@ pub mod send_message_to_telegram {
     }
 
 
-    pub async fn send_message(chat_id: i64, message: &Message) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_message(message: &Message) -> Result<(), Box<dyn std::error::Error>> {
         from_path("src/asset/.env").ok();
        
         if std::env::var("TELEGRAM_BOT_KEY").is_err() {
             return Err("TELEGRAM_BOT_KEY is not set".into());
         }
-        let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap()).update_interval(200);
 
-        let _ = bot.request
-            .message(chat_id, format!(
-            "Transfer Event:\nFrom: {}\nTo: {}\nValue: {}\nTransaction Hash: {}",
-            message.from, message.to, message.value, message.tx_hash
-            ))
-            .send();
+        // Get chat_id from environment variable or config
+        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
+            .ok()
+            .and_then(|id| id.parse().ok())
+            .unwrap_or(1234); // fallback to 1234 if not set
 
+        let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap());
+
+        let _ = bot.request.message(
+            chat_id,
+            format!(
+                "Transfer Event:\nFrom: {}\nTo: {}\nValue: {}\nTransaction Hash: {}",
+                message.from, message.to, message.value, message.tx_hash
+            ),
+        )
+        .send();
         Ok(())
     }
-}
 
-pub fn get_token_id_from_env() -> Option<String> {
-    // Load .env from the custom path (e.g., src/asset/.env)
-    from_path("src/asset/.env").ok();
-    std::env::var("TOKEN_ID").ok()
+    // pub fn example_send(message: &str)-> Result<(), Box<dyn std::error::Error>> {
+    //       from_path("src/asset/.env").ok();
+       
+    //     if std::env::var("TELEGRAM_BOT_KEY").is_err() {
+    //         return Err("TELEGRAM_BOT_KEY is not set".into());
+    //     }
+
+    //     // Get chat_id from environment variable or config
+    //     let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
+    //         .ok()
+    //         .and_then(|id| id.parse().ok())
+    //         .unwrap_or(1234); // fallback to 1234 if not set
+
+    //     let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap());
+
+    //     // Send the message
+    // let _ = bot.request.message(chat_id, format!("Example Message: {}", message))
+    //     .send();
+    // Ok(())
+    // }
 }
