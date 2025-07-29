@@ -2,7 +2,6 @@ use ethers::prelude::*;
 use ethers_providers::Ws;
 use ethers::core::types::{ Filter, U256, Address};
 use tokio::sync::mpsc;
-use std::time::Duration;
 use tokio::select;
 use tokio::signal::ctrl_c;
 
