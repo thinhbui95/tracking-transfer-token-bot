@@ -22,8 +22,10 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rpc_url = entry.url.clone();
         let contract_address = entry.address.clone();
         let name = entry.name.clone();
+        let decimal = entry.decimal;
+        let explorer = entry.explorer.clone();
         tokio::spawn(async move {
-            if let Err(e) = get_event::get_transfer_events(&rpc_url, &contract_address, tx).await {
+            if let Err(e) = get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer, tx).await {
                 println!("Error fetching events for {}: {}", name, e);
             }
         });
@@ -37,6 +39,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 to: event.to,
                 value: event.value,
                 tx_hash: event.tx_hash,
+                explorer: event.explorer.clone(), // Pass the explorer URL if available
             };
 
              // Call the send_message function
@@ -66,8 +69,9 @@ mod get_event {
     pub struct TransferEvent {
         pub from: Address,
         pub to: Address,
-        pub value: U256,
+        pub value: f64,
         pub tx_hash: H256,
+        pub explorer: Option<String>,
     }
 
     // Remove the custom Transfer struct, as it's not needed.
@@ -77,7 +81,7 @@ mod get_event {
         Provider::new(ws)
     }
 
-    pub async fn get_transfer_events(rpc: &str, contract_address: &str, tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
         let provider = get_provider(rpc).await;
         let client = Arc::new(provider);
         let filter = Filter::new()
@@ -97,8 +101,9 @@ mod get_event {
             let transfer_event = TransferEvent {
                 from,
                 to,
-                value,
+                value: value.as_u128() as f64 / 10f64.powi(decimal as i32),
                 tx_hash,
+                explorer:explorer.clone()
             };
 
             // Send the transfer event to the channel
@@ -120,6 +125,8 @@ mod get_config {
         pub name: String,
         pub url: String,
         pub address: String,
+        pub decimal: u8,
+        pub explorer: Option<String>, // Optional field for explorer URL
     }
 
     impl Config {
@@ -150,9 +157,7 @@ mod get_config {
 }
 
 mod send_message_to_telegram {
-    use teloxide::Bot;
-    use teloxide::requests::Requester;
-    use std::env;
+    use teloxide::{ Bot, requests::Requester, payloads::SendMessageSetters };
     use dotenv::from_path;
     use super::*;
 
@@ -160,37 +165,55 @@ mod send_message_to_telegram {
     pub struct Message {
         pub from: Address,
         pub to: Address,
-        pub value: U256,
+        pub value: f64,
         pub tx_hash: H256,
+        // Optional field for explorer URL
+        pub explorer: Option<String>,
     }
 
 
     pub async fn send_message(message: &Message) -> Result<(), Box<dyn std::error::Error>> {
         from_path("src/asset/.env").ok();
-       
+
         if std::env::var("TELEGRAM_BOT_KEY").is_err() {
             return Err("TELEGRAM_BOT_KEY is not set".into());
         }
 
+        let explorer_url = message.explorer.clone().unwrap_or_default();
+        let from_link = format!(
+            r#"<a href="{}/address/{:#x}">{:#x}</a>"#, 
+            explorer_url, message.from, message.from
+        );
+        let to_link = format!(
+            r#"<a href="{}/address/{:#x}">{:#x}</a>"#, 
+            explorer_url, message.to, message.to
+        );
+        let tx_link = format!(
+            r#"<a href="{}/tx/{:#x}">{:#x}</a>"#, 
+            explorer_url, message.tx_hash, message.tx_hash
+        );
+
         // Get chat ID
-        let chat_id: i64 = env::var("TELEGRAM_CHAT_ID")
+        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
             .map_err(|_| "TELEGRAM_CHAT_ID environment variable is not set")?
             .parse()
             .map_err(|_| "TELEGRAM_CHAT_ID is not a valid i64")?;
 
-        let bot = Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap());
+        let bot = Bot::new(&std::env::var("TELEGRAM_BOT_KEY").unwrap());
 
-        // Send the message
+        // Send the message with HTML parse mode
+        let text = format!(
+            "Transfer Event:\nFrom: {}\nTo: {}\nValue: {}\nTx_Hash: {}",
+            from_link,
+            to_link,
+            message.value,
+            tx_link
+        );
         bot.send_message(
             teloxide::types::ChatId(chat_id),
-            format!(
-                "Transfer Event:\nFrom: {:#x}\nTo: {:#x}\nValue: {}\nTransaction Hash: {:#x}",
-                message.from,
-                message.to,
-                message.value,
-                message.tx_hash
-            ),
+            text,
         )
+        .parse_mode(teloxide::types::ParseMode::Html) // <--- This is required!
         .await
         .map_err(|e| format!("Failed to send message: {}", e))?;
         Ok(())
