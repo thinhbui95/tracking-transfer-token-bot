@@ -200,16 +200,16 @@ mod send_message_to_telegram {
 
         let explorer_url = message.explorer.clone().unwrap_or_default();
         let from_link = format!(
-            r#"<a href="{}/address/{:#x}">{:#x}</a>"#, 
-            explorer_url, message.from, message.from
+            r#"<a href="{}/address/{:#x}">{}</a>"#, 
+            explorer_url, message.from, message.from.to_string()
         );
         let to_link = format!(
-            r#"<a href="{}/address/{:#x}">{:#x}</a>"#, 
-            explorer_url, message.to, message.to
+            r#"<a href="{}/address/{:#x}">{}</a>"#, 
+            explorer_url, message.to, message.to.to_string()
         );
         let tx_link = format!(
-            r#"<a href="{}/tx/{:#x}">{:#x}</a>"#, 
-            explorer_url, message.tx_hash, message.tx_hash
+            r#"<a href="{}/tx/{:#x}">{}</a>"#, 
+            explorer_url, message.tx_hash, "Detail"
         );
 
         // Get chat ID
