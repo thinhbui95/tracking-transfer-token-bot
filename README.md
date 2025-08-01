@@ -1,4 +1,4 @@
-# get_price_token
+# tracking-transfer-token-bot
 
 A Rust-based service for monitoring ERC-20 token Transfer events on multiple blockchains and sending formatted notifications to a Telegram chat.
 
@@ -34,6 +34,13 @@ Edit `src/asset/config.json` to add or update networks:
     "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
     "decimal": 6,
     "explorer": "https://etherscan.io"
+  },
+   "VICTION": {
+    "name": "VICTION",
+    "url": "wss://viction.drpc.org",
+    "address": "0x0Fd0288AAAE91eaF935e2eC14b23486f86516c8C",
+    "decimal": 18,
+    "explorer": "https://vicscan.xyz"
   }
 }
 ```
@@ -77,7 +84,3 @@ To: <a href="https://etherscan.io/address/0x...">0x...</a>
 Value: 123.45
 Transaction Hash: <a href="https://etherscan.io/tx/0x...">0x...</a>
 ```
-
-## License
-
-MIT
