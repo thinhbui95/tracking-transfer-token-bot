@@ -24,21 +24,21 @@ Edit `src/asset/config.json` to add or update networks:
   "BSC Mainnet": {
     "name": "BSC Mainnet",
     "url": "wss://bsc-rpc.publicnode.com",
-    "address": "0xaec945e04baf28b135fa7c640f624f8d90f1c3a6",
+    "address": "",
     "decimal": 18,
     "explorer": "https://bscscan.com"
   },
   "ETHEREUM": {
     "name": "ETHEREUM",
     "url": "wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY",
-    "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+    "address": "",
     "decimal": 6,
     "explorer": "https://etherscan.io"
   },
    "VICTION": {
     "name": "VICTION",
     "url": "wss://viction.drpc.org",
-    "address": "0x0Fd0288AAAE91eaF935e2eC14b23486f86516c8C",
+    "address": "",
     "decimal": 18,
     "explorer": "https://vicscan.xyz"
   }
