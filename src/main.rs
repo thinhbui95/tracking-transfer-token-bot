@@ -6,53 +6,59 @@ use tokio::select;
 use tokio::signal::ctrl_c;
 use tracking_transfer_token_bot::{ TransferEvent, Config, Message, get_detail_tx };
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a channel for sending TransferEvent messages between producer and consumer tasks.
-    let (tx, mut rx) = mpsc::channel::<TransferEvent>(5);
+    let (tx_solana_rt, mut rx_solana_rt) = mpsc::channel::<TransferEvent>(50);
+    let (tx_evm_rt, mut rx_evm_rt) = mpsc::channel::<TransferEvent>(50);
 
     // Load all blockchain configurations from config.json.
     let configs = get_config::load_all_configs()?;
-    print!("Loaded {:?} configurations from config.json\n", configs);
     if configs.is_empty() {
         eprintln!("No configurations found in config.json");
         return Ok(());
     }
 
+    // At the top of main(), create a vector to track task handles:
+    let mut task_handles = Vec::new();
+
     // Spawn a producer task for each config entry to listen for transfer events.
     for (_key, entry) in configs {
-        let tx = tx.clone();
+        let tx_solana_rt = tx_solana_rt.clone();
+        let tx_evm_rt = tx_evm_rt.clone();
         let rpc_url = entry.rpc.clone();
         let ws_url = entry.wss.clone();
         let contract_address = entry.address.clone();
         let name = entry.name.clone();
         let decimal = entry.decimal;
         let explorer = entry.explorer.clone();
-        tokio::spawn(async move {
-            println!("Listening for events on Solana: {}", name);
+        let handle = tokio::spawn(async move {
             if entry.name.to_lowercase().contains("solana") {
-                // For Solana, use the get_detail_tx function
-                // if let Err(e) = get_detail_tx(rpc_url, ws_url, contract_address, decimal, tx).await {
-                //     println!("Error fetching events for {}: {}", name, e);
-                // }
+                print!("Listening to Solana events for {}\n", name);
+                //For Solana, use the get_detail_tx function
+                if let Err(e) = get_detail_tx(rpc_url, ws_url, contract_address, decimal, explorer,tx_solana_rt).await {
+                    println!("Error fetching events for {}: {}", name, e);
+                }
             } else {
                 // For EVM-compatible chains, use the get_transfer_events function
-                if let Err(e) = get_event::get_transfer_events(&ws_url, &contract_address, decimal, explorer.clone(), tx.clone()).await {
+                print!("Listening to EVM events for {}\n", name);
+                if let Err(e) = get_event::get_transfer_events(&ws_url, &contract_address, decimal, explorer.clone(), tx_evm_rt).await {
                     println!("Error fetching events for {}: {}", name, e);
                 }
             }
         });
+        task_handles.push(handle);
     }
 
-    // Spawn a consumer task to receive events and send formatted messages to Telegram.
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
+    // Also store consumer task handles:
+    let solana_consumer = tokio::spawn(async move {
+        while let Some(event_solana) = rx_solana_rt.recv().await {
             let message = Message {
-                from: event.from,
-                to: event.to,
-                value: event.value,
-                tx_hash: event.tx_hash,
-                explorer: event.explorer.clone(), // Pass the explorer URL if available
+                from: event_solana.from,
+                to: event_solana.to,
+                value: event_solana.value,
+                tx_hash: event_solana.tx_hash,
+                explorer: event_solana.explorer.clone(), // Pass the explorer URL if available
             };
 
             // Call the send_message function to notify via Telegram.
@@ -61,16 +67,47 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    task_handles.push(solana_consumer);
+
+    // Spawn another consumer task for EVM events
+    let evm_consumer = tokio::spawn(async move {
+        while let Some(event_evm) = rx_evm_rt.recv().await {
+            let message = Message {
+                from: event_evm.from,
+                to: event_evm.to,
+                value: event_evm.value,
+                tx_hash: event_evm.tx_hash,
+                explorer: event_evm.explorer.clone(), // Pass the explorer URL if available
+            };
+
+            // Call the send_message function to notify via Telegram.
+            if let Err(e) = send_message_to_telegram::send_message(&message).await {
+                println!("Error sending message: {}", e);
+            }
+        }
+    });
+    task_handles.push(evm_consumer);
 
     // Keep the main function alive and gracefully shut down on Ctrl+C.
     loop {
         select! {
             _ = ctrl_c() => {
                 println!("Ctrl+C pressed, shutting down...");
-                return Ok(());
+                break;
+            }
+            (result, _, remaining) = futures::future::select_all(task_handles), if !task_handles.is_empty() => {
+                task_handles = remaining;
+                // A task completed - check if it was an error
+                if let Err(e) = result {
+                    eprintln!("A task failed: {}", e);
+                    // Decide if you want to exit or continue
+                    break;
+                }
             }
         }
     }
+
+    Ok(())
 }
 
 mod get_event {
@@ -113,12 +150,13 @@ mod get_event {
 
             // Convert value to human-readable float using the token's decimals.
             let transfer_event = TransferEvent {
-                from: from.to_string(),
-                to: to.to_string(),
+                from: format!("{:?}", from),
+                to: format!("{:?}", to),
                 value: value.as_u128() as f64 / 10f64.powi(decimal as i32),
-                tx_hash: tx_hash.to_string(),
+                tx_hash: format!("{:?}", tx_hash),
                 explorer: explorer.clone()
             };
+            print!("Transfer: {} -> {} | Value: {}\n", transfer_event.from, transfer_event.to, transfer_event.value);
 
             // Send the transfer event to the channel
             if tx.send(transfer_event).await.is_err() {
@@ -178,31 +216,18 @@ mod send_message_to_telegram {
 
         let explorer_url = message.explorer.clone().unwrap_or_default();
         
-        // Debug output - remove the problematic parsing
-        println!("From address: {}", message.from);
-        println!("To address: {}", message.to);
-        
-        // Helper function to truncate addresses for display
-        let truncate_address = |addr: &str| -> String {
-            if addr.len() > 10 {
-                format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
-            } else {
-                addr.to_string()
-            }
-        };
-
         // Use the raw string addresses directly - NO PARSING
         let from_link = format!(
             r#"<a href="{}/address/{}">{}</a>"#, 
             explorer_url, 
-            message.from,  // Use the full address for the URL
-            truncate_address(&message.from)  // Use truncated for display
+            message.from.trim_matches('"'),  // Use the full address for the URL
+            message.from.trim_matches('"')  // Use truncated for display
         );
         let to_link = format!(
             r#"<a href="{}/address/{}">{}</a>"#, 
             explorer_url, 
-            message.to, 
-            truncate_address(&message.to)
+            message.to.trim_matches('"'), 
+            message.to.trim_matches('"')
         );
         let tx_link = format!(
             r#"<a href="{}/tx/{}">📋 View Details</a>"#, 

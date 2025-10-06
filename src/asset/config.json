@@ -19,7 +19,7 @@
     "name": "ETHEREUM",
     "wss": "wss://ethereum-rpc.publicnode.com",
     "rpc": "https://eth-rpc.publicnode.com",
-    "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+    "address": "0xae12c5930881c53715b369cec7606b70d8eb229f",
     "decimal": 18,
     "explorer": "https://etherscan.io"
   },
@@ -28,7 +28,7 @@
     "wss": "wss://api.mainnet-beta.solana.com",
     "rpc": "https://api.mainnet-beta.solana.com",
     "address": "C98A4nkJXhpVZNAZdHUA95RpTF3T4whtQubL3YobiUX9",
-    "decimal": 9,
+    "decimal": 6,
     "explorer": "https://solscan.io"
   }
 }
