@@ -11,7 +11,16 @@ use spl_token::{ state::Account as TokenAccount, solana_program::program_pack::P
 use tokio::sync::mpsc;
 use crate::{ VerificationError, TransferEvent };
 
-
+/// Listens for and processes transactions involving a specific SPL token mint address on the Solana blockchain.
+/// # Arguments
+/// * `rpc_url` - The RPC URL of the Solana node to connect to.
+/// * `ws_url` - The WebSocket URL of the Solana node for real-time updates.
+/// * `mint` - The mint address of the SPL token to monitor.
+/// * `decimal` - The number of decimal places the token uses.
+/// * `explorer` - An optional URL to a block explorer for transaction links.
+/// * `tx_receiver` - A channel sender to send processed transfer events.
+/// # Returns
+/// * `Result<(), Box<dyn Error + Send + Sync>>` - Returns Ok(()) if successful, or an error if something goes wrong.
 pub async fn get_detail_tx(rpc_url: String, ws_url: String, mint: String, decimal: u8, explorer: Option<String>, tx_receiver: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let client = RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
@@ -46,6 +55,13 @@ pub async fn get_detail_tx(rpc_url: String, ws_url: String, mint: String, decima
     Ok(())
 }
 
+/// Verifies that a given token account corresponds to the expected mint address.
+/// # Arguments
+/// * `client` - The RPC client to use for fetching account data.
+/// * `token_account` - The public key of the token account to verify.
+/// * `expected_mint` - The expected mint address of the token.
+/// # Returns
+/// * `Result<(), VerificationError>` - Returns Ok(()) if the token account is valid, or a VerificationError if it is not.
 fn verify_token_account_mint(
     client: &RpcClient,
     token_account: &Pubkey,
@@ -75,6 +91,16 @@ fn verify_token_account_mint(
     Ok(())
 }
 
+/// Processes transactions to extract and send transfer events for a specific SPL token.
+/// # Arguments
+/// * `client` - The RPC client to use for fetching transaction data.
+/// * `filter_account` - The mint address of the SPL token to filter transactions.
+/// * `decimal` - The number of decimal places the token uses.
+/// * `explorer` - An optional URL to a block explorer for transaction links.
+/// * `rx` - A channel receiver to receive transaction signatures.
+/// * `tx_receiver` - A channel sender to send processed transfer events.
+/// # Returns
+/// * `Result<(), Box<dyn Error + Send + Sync>>` - Returns Ok(()) if successful, or an error if something goes wrong.
 async fn get_info_transaction(client: &RpcClient, filter_account: &str, decimal: u8, explorer: Option<String>,mut rx: mpsc::Receiver<String>, tx_receiver: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn Error + Send + Sync>> {
     while let Some(tx_signature) = rx.recv().await {
         let tx = client.get_transaction_with_config(
