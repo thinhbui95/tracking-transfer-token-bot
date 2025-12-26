@@ -16,6 +16,18 @@ pub struct TransferEvent {
     pub explorer: Option<String>,
 }
 
+impl Default for TransferEvent {
+    fn default() -> Self {
+        TransferEvent {
+            from: Address::zero(),
+            to: Address::zero(),
+            value: 0.0,
+            tx_hash: H256::zero(),
+            explorer: None,
+        }
+    }
+}
+
 
 // Helper function to create a WebSocket provider for the given URL.
 async fn get_provider(url: &str) -> Provider<Ws> {
