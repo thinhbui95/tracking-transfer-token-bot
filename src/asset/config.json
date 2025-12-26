@@ -1,33 +1,33 @@
 {
   "BSC Mainnet": {
     "name": "BSC Mainnet",
-    "wss": "wss://bsc-rpc.publicnode.com",
-    "rpc": "https://bsc-dataseed.binance.org/",
-    "address": "0xaec945e04baf28b135fa7c640f624f8d90f1c3a6",
+    "chain_type": "evm",
+    "url": "wss://bsc-rpc.publicnode.com",
+    "address": "",
     "decimal": 18,
     "explorer": "https://bscscan.com"
   },
   "VICTION": {
     "name": "VICTION",
-    "wss": "wss://viction.drpc.org",
-    "rpc": "https://rpc.viction.xyz",
-    "address": "0x0Fd0288AAAE91eaF935e2eC14b23486f86516c8C",
+    "chain_type": "evm",
+    "url": "wss://viction.drpc.org",
+    "address": "",
     "decimal": 18,
     "explorer": "https://vicscan.xyz"
   },
   "ETHEREUM": {
     "name": "ETHEREUM",
-    "wss": "wss://ethereum-rpc.publicnode.com",
-    "rpc": "https://eth-rpc.publicnode.com",
-    "address": "0xae12c5930881c53715b369cec7606b70d8eb229f",
+    "chain_type": "evm",
+    "url": "wss://ethereum-rpc.publicnode.com",
+    "address": "",
     "decimal": 18,
     "explorer": "https://etherscan.io"
   },
   "SOLANA": {
     "name": "SOLANA",
-    "wss": "wss://api.mainnet-beta.solana.com",
-    "rpc": "https://api.mainnet-beta.solana.com",
-    "address": "C98A4nkJXhpVZNAZdHUA95RpTF3T4whtQubL3YobiUX9",
+    "chain_type": "solana",
+    "url": "wss://api.mainnet-beta.solana.com",
+    "address": "",
     "decimal": 6,
     "explorer": "https://solscan.io"
   }

@@ -24,35 +24,39 @@ Edit `src/asset/config.json` to add or update networks:
 {
   "BSC Mainnet": {
     "name": "BSC Mainnet",
+    "chain_type": "evm",
     "url": "wss://bsc-rpc.publicnode.com",
     "address": "",
     "decimal": 18,
     "explorer": "https://bscscan.com"
   },
-  "ETHEREUM": {
-    "name": "ETHEREUM",
-    "url": "wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY",
-    "address": "",
-    "decimal": 6,
-    "explorer": "https://etherscan.io"
-  },
-   "VICTION": {
+  "VICTION": {
     "name": "VICTION",
+    "chain_type": "evm",
     "url": "wss://viction.drpc.org",
     "address": "",
     "decimal": 18,
     "explorer": "https://vicscan.xyz"
   },
+  "ETHEREUM": {
+    "name": "ETHEREUM",
+    "chain_type": "evm",
+    "url": "wss://ethereum-rpc.publicnode.com",
+    "address": "",
+    "decimal": 18,
+    "explorer": "https://etherscan.io"
+  },
   "SOLANA": {
     "name": "SOLANA",
-    "wss": "wss://api.mainnet-beta.solana.com",
-    "rpc": "https://api.mainnet-beta.solana.com",
+    "chain_type": "solana",
+    "url": "wss://api.mainnet-beta.solana.com",
     "address": "",
     "decimal": 6,
     "explorer": "https://solscan.io"
   }
 }
 ```
+Adding Round-Robin RPC Support for Solana in  `src/asset/list_of_rpc.json`
 
 ### 2. Telegram Bot & Chat
 

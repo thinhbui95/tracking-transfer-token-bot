@@ -1,16 +1,15 @@
-use ethers::prelude::*;
-use ethers_providers::Ws;
-use ethers::core::types::{ Filter, U256, Address};
-use tokio::sync::mpsc;
-use tokio::select;
-use tokio::signal::ctrl_c;
-use tracking_transfer_token_bot::{ TransferEvent, Config, Message, get_detail_tx };
+use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram, solana_adapter};
+use tokio::{sync::mpsc, select, signal::ctrl_c, time::{sleep, Duration, interval}};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::str::FromStr;
+use solana_sdk::pubkey::Pubkey;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a channel for sending TransferEvent messages between producer and consumer tasks.
-    let (tx_solana_rt, mut rx_solana_rt) = mpsc::channel::<TransferEvent>(50);
-    let (tx_evm_rt, mut rx_evm_rt) = mpsc::channel::<TransferEvent>(50);
+    // Create a channel with larger buffer for better throughput
+    let (tx, rx) = mpsc::channel::<get_event::TransferEvent>(200);
 
     // Load all blockchain configurations from config.json.
     let configs = get_config::load_all_configs()?;
@@ -19,251 +18,192 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // At the top of main(), create a vector to track task handles:
-    let mut task_handles = Vec::new();
+    // Spawn a producer task for each config entry with auto-reconnect
+    for (_, entry) in configs {
+        let chain_type = entry.chain_type.as_deref().unwrap_or("evm");
+        
+        match chain_type {
+            "solana" => {
+                // Spawn Solana listener
+                let rpc_url = entry.url.clone();
+                // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
+                // We need WebSocket for subscriptions, so convert if needed
+                let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
+                    rpc_url.clone()
+                } else {
+                    rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+                };
+                
+                let mint = entry.address.clone();
+                let name = entry.name.clone();
+                let decimal = entry.decimal;
+                let explorer = entry.explorer.clone();
+                
+                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, rpc_url, ws_url, mint);
+                
+                tokio::spawn(async move {
+                    loop {
+                        println!("[{}] Starting Solana event listener...", name);
+                        
+                        // Parse token program ID (standard SPL Token)
+                        let token_program_id = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                            .expect("Invalid token program ID");
+                        
+                        match solana_adapter::get_detail_tx(
+                            rpc_url.clone(),
+                            ws_url.clone(),
+                            mint.clone(),
+                            decimal,
+                            explorer.clone(),
+                            token_program_id,
+                        ).await {
+                            Ok(_) => println!("[{}] Solana stream ended normally", name),
+                            Err(e) => eprintln!("[{}] Solana Error: {}. Reconnecting in 5s...", name, e),
+                        }
+                        
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                });
+            }
+            "evm" | _ => {
+                // Spawn EVM listener (default)
+                let tx = tx.clone();
+                let rpc_url = entry.url.clone();
+                let contract_address = entry.address.clone();
+                let name = entry.name.clone();
+                let decimal = entry.decimal;
+                let explorer = entry.explorer.clone();
+                
+                tokio::spawn(async move {
+                    loop {
+                        println!("[{}] Starting EVM event listener...", name);
+                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(), tx.clone()).await {
+                            Ok(_) => println!("[{}] EVM stream ended normally", name),
+                            Err(e) => eprintln!("[{}] EVM Error: {}. Reconnecting in 5s...", name, e),
+                        }
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                });
+            }
+        }
+    }
 
-    // Spawn a producer task for each config entry to listen for transfer events.
-    for (_key, entry) in configs {
-        let tx_solana_rt = tx_solana_rt.clone();
-        let tx_evm_rt = tx_evm_rt.clone();
-        let rpc_url = entry.rpc.clone();
-        let ws_url = entry.wss.clone();
-        let contract_address = entry.address.clone();
-        let name = entry.name.clone();
-        let decimal = entry.decimal;
-        let explorer = entry.explorer.clone();
-        let handle = tokio::spawn(async move {
-            if entry.name.to_lowercase().contains("solana") {
-                print!("Listening to Solana events for {}\n", name);
-                //For Solana, use the get_detail_tx function
-                if let Err(e) = get_detail_tx(rpc_url, ws_url, contract_address, decimal, explorer,tx_solana_rt).await {
-                    println!("Error fetching events for {}: {}", name, e);
-                }
-            } else {
-                // For EVM-compatible chains, use the get_transfer_events function
-                print!("Listening to EVM events for {}\n", name);
-                if let Err(e) = get_event::get_transfer_events(&ws_url, &contract_address, decimal, explorer.clone(), tx_evm_rt).await {
-                    println!("Error fetching events for {}: {}", name, e);
+    // Spawn multiple consumer workers for parallel processing
+    let num_workers = 8;
+    let rx = Arc::new(Mutex::new(rx));
+    
+    for worker_id in 0..num_workers {
+        let rx = Arc::clone(&rx);
+        tokio::spawn(async move {
+            let mut batch: Vec<get_event::TransferEvent> = Vec::new();
+            let mut seen_hashes: HashSet<String> = HashSet::new();
+            let mut batch_interval = interval(Duration::from_secs(2));
+            batch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            
+            loop {
+                select! {
+                    // Receive events and add to batch
+                    event = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => {
+                        let Some(event) = event else {
+                            // Channel closed, send remaining batch and exit
+                            if !batch.is_empty() {
+                                send_batch(&mut batch, worker_id).await;
+                            }
+                            break;
+                        };
+                        
+                        let tx_hash_str = format!("{:#x}", event.tx_hash);
+                        
+                        // Deduplication: skip if already processed
+                        if seen_hashes.contains(&tx_hash_str) {
+                            continue;
+                        }
+                        seen_hashes.insert(tx_hash_str);
+                        
+                        // Limit dedup cache size
+                        if seen_hashes.len() > 1000 {
+                            seen_hashes.clear();
+                        }
+                        
+                        batch.push(event);
+                        
+                        // If batch is full, send immediately
+                        if batch.len() >= 5 {
+                            send_batch(&mut batch, worker_id).await;
+                        }
+                    }
+                    // Send batch periodically even if not full
+                    _ = batch_interval.tick() => {
+                        if !batch.is_empty() {
+                            send_batch(&mut batch, worker_id).await;
+                        }
+                    }
                 }
             }
         });
-        task_handles.push(handle);
     }
 
-    // Also store consumer task handles:
-    let solana_consumer = tokio::spawn(async move {
-        while let Some(event_solana) = rx_solana_rt.recv().await {
-            let message = Message {
-                from: event_solana.from,
-                to: event_solana.to,
-                value: event_solana.value,
-                tx_hash: event_solana.tx_hash,
-                explorer: event_solana.explorer.clone(), // Pass the explorer URL if available
-            };
+    // Drop the original sender so channel can close when all producers finish
+    drop(tx);
 
-            // Call the send_message function to notify via Telegram.
-            if let Err(e) = send_message_to_telegram::send_message(&message).await {
-                println!("Error sending message: {}", e);
-            }
-        }
-    });
-    task_handles.push(solana_consumer);
-
-    // Spawn another consumer task for EVM events
-    let evm_consumer = tokio::spawn(async move {
-        while let Some(event_evm) = rx_evm_rt.recv().await {
-            let message = Message {
-                from: event_evm.from,
-                to: event_evm.to,
-                value: event_evm.value,
-                tx_hash: event_evm.tx_hash,
-                explorer: event_evm.explorer.clone(), // Pass the explorer URL if available
-            };
-
-            // Call the send_message function to notify via Telegram.
-            if let Err(e) = send_message_to_telegram::send_message(&message).await {
-                println!("Error sending message: {}", e);
-            }
-        }
-    });
-    task_handles.push(evm_consumer);
-
-    // Keep the main function alive and gracefully shut down on Ctrl+C.
-    loop {
-        select! {
-            _ = ctrl_c() => {
-                println!("Ctrl+C pressed, shutting down...");
-                break;
-            }
-            (result, _, remaining) = futures::future::select_all(task_handles), if !task_handles.is_empty() => {
-                task_handles = remaining;
-                // A task completed - check if it was an error
-                if let Err(e) = result {
-                    eprintln!("A task failed: {}", e);
-                    // Decide if you want to exit or continue
-                    break;
-                }
-            }
+    // Graceful shutdown on Ctrl+C
+    select! {
+        _ = ctrl_c() => {
+            println!("\n🛑 Ctrl+C received, shutting down gracefully...");
+            println!("⏳ Waiting for workers to finish processing...");
+            
+            // Give workers time to finish current batches
+            sleep(Duration::from_secs(3)).await;
+            
+            println!("✅ Shutdown complete");
         }
     }
-
+    
     Ok(())
 }
 
-mod get_event {
-    use std::sync::Arc;
-    use ethers::{abi::AbiDecode, providers::Middleware};
-    use super::*;
-
-    // Helper function to create a WebSocket provider for the given URL.
-    async fn get_provider(url: &str) -> Provider<Ws> {
-        let ws = Ws::connect(url).await.expect("Failed to connect to WebSocket");
-        Provider::new(ws)
+/// Helper function to send a batch of events
+async fn send_batch(batch: &mut Vec<get_event::TransferEvent>, worker_id: usize) {
+    if batch.is_empty() {
+        return;
     }
+    
+    println!("[Worker {}] Processing batch of {} events", worker_id, batch.len());
+    
+    for event in batch.drain(..) {
+        let message = send_message_to_telegram::Message {
+            from: event.from,
+            to: event.to,
+            value: event.value,
+            tx_hash: event.tx_hash,
+            explorer: event.explorer.clone(),
+        };
 
-    /// Listens for Transfer events on the given contract and sends them through the channel.
-    /// - `rpc`: WebSocket RPC URL for the blockchain node.
-    /// - `contract_address`: Address of the token contract to monitor.
-    /// - `decimal`: Number of decimals for the token (for human-readable value).
-    /// - `explorer`: Optional block explorer URL for formatting links.
-    /// - `tx`: Channel sender to forward decoded TransferEvent structs.
-    pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
-        let provider = get_provider(rpc).await;
-        let client = Arc::new(provider);
-        // Build a filter for the Transfer event of the specified contract.
-        let filter = Filter::new()
-            .address(contract_address.parse::<Address>().unwrap())
-            .event("Transfer(address,address,uint256)");
+        // Retry logic with exponential backoff
+        let mut retry_count = 0;
+        let max_retries = 3;
         
-        // Subscribe to the event logs using the filter.
-        let mut stream = client.subscribe_logs(&filter)
-            .await
-            .unwrap();
-
-        // Process each log entry as it arrives.
-        while let Some(log) = stream.next().await {
-            // topics[0] is the event signature, topics[1] is from, topics[2] is to
-            let from: Address = Address::from(log.topics[1]);
-            let to: Address = Address::from(log.topics[2]);
-            let value: U256 = U256::decode(log.data.as_ref()).unwrap();
-            let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
-
-            // Convert value to human-readable float using the token's decimals.
-            let transfer_event = TransferEvent {
-                from: format!("{:?}", from),
-                to: format!("{:?}", to),
-                value: value.as_u128() as f64 / 10f64.powi(decimal as i32),
-                tx_hash: format!("{:?}", tx_hash),
-                explorer: explorer.clone()
-            };
-            print!("Transfer: {} -> {} | Value: {}\n", transfer_event.from, transfer_event.to, transfer_event.value);
-
-            // Send the transfer event to the channel
-            if tx.send(transfer_event).await.is_err() {
-                eprintln!("Failed to send transfer event");
+        while retry_count < max_retries {
+            match send_message_to_telegram::send_message(&message).await {
+                Ok(_) => break,
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count < max_retries {
+                        eprintln!("[Worker {}] Send failed (attempt {}/{}): {}. Retrying...", 
+                                  worker_id, retry_count, max_retries, e);
+                        sleep(Duration::from_millis(500 * retry_count as u64)).await;
+                    } else {
+                        eprintln!("[Worker {}] Failed to send message after {} attempts: {}", 
+                                  worker_id, max_retries, e);
+                    }
+                }
             }
         }
-        Ok(())
-    }
-}
-
-mod get_config {
-    use std::fs;
-    use std::collections::HashMap;
-    use crate::Config;
-
-    // Add a new config entry to config.json
-    #[allow(dead_code)]
-    pub fn add_config_to_file(key: String, config: Config) -> Result<(), Box<dyn std::error::Error>> {
-        let path = "src/asset/config.json";
-        // Load existing configs
-        let mut configs: HashMap<String, Config> = if let Ok(content) = fs::read_to_string(path) {
-            serde_json::from_str(&content)?
-        } else {
-            HashMap::new()
-        };
-        // Insert new config
-        configs.insert(key, config);
-        // Write back to file
-        let new_content = serde_json::to_string_pretty(&configs)?;
-        fs::write(path, new_content)?;
-        Ok(())
-    }
-
-    /// Loads all config entries from config.json into a HashMap.
-    pub fn load_all_configs() -> Result<std::collections::HashMap<String, Config>, Box<dyn std::error::Error>> {
-        let config_str = fs::read_to_string("src/asset/config.json")?;
-        let configs: std::collections::HashMap<String, Config> = serde_json::from_str(&config_str)?;
-        Ok(configs)
-    }
-}
-
-mod send_message_to_telegram {
-    use teloxide::{ Bot, requests::Requester, payloads::SendMessageSetters };
-    use dotenv::from_path;
-    use crate::Message;
-
-    /// Sends a formatted message to a Telegram chat using the bot.
-    /// The message includes clickable links for the from/to addresses and transaction hash.
-    pub async fn send_message(message: &Message) -> Result<(), Box<dyn std::error::Error>> {
-        // Load environment variables from the custom .env path
-        from_path("src/asset/.env").ok();
-
-        // Ensure the TELEGRAM_BOT_KEY is set
-        if std::env::var("TELEGRAM_BOT_KEY").is_err() {
-            return Err("TELEGRAM_BOT_KEY is not set".into());
-        }
-
-        let explorer_url = message.explorer.clone().unwrap_or_default();
         
-        // Use the raw string addresses directly - NO PARSING
-        let from_link = format!(
-            r#"<a href="{}/address/{}">{}</a>"#, 
-            explorer_url, 
-            message.from.trim_matches('"'),  // Use the full address for the URL
-            message.from.trim_matches('"')  // Use truncated for display
-        );
-        let to_link = format!(
-            r#"<a href="{}/address/{}">{}</a>"#, 
-            explorer_url, 
-            message.to.trim_matches('"'), 
-            message.to.trim_matches('"')
-        );
-        let tx_link = format!(
-            r#"<a href="{}/tx/{}">📋 View Details</a>"#, 
-            explorer_url, 
-            message.tx_hash
-        );
-
-        // Get chat ID
-        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-            .map_err(|_| "TELEGRAM_CHAT_ID environment variable is not set")?
-            .parse()
-            .map_err(|_| "TELEGRAM_CHAT_ID is not a valid i64")?;
-
-        let bot = Bot::new(&std::env::var("TELEGRAM_BOT_KEY").unwrap());
-
-        // Send the message with HTML parse mode and better formatting
-        let text = format!(
-            "🔄 <b>Token Transfer</b>\n\n\
-            📤 <b>From:</b> {}\n\
-            📥 <b>To:</b> {}\n\
-            💰 <b>Amount:</b> {}\n\
-            🔗 <b>Transaction:</b> {}",
-            from_link,
-            to_link,
-            message.value,
-            tx_link
-        );
-        
-        bot.send_message(
-            teloxide::types::ChatId(chat_id),
-            text,
-        )
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await
-        .map_err(|e| format!("Failed to send message: {}", e))?;
-        
-        Ok(())
+        // Rate limiting: small delay between messages
+        sleep(Duration::from_millis(100)).await;
     }
 }
