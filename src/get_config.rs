@@ -5,9 +5,10 @@ use serde::{ Deserialize , Serialize };
 /// Struct representing a configuration entry for a blockchain network.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub name: String,                // Name of the network (e.g., "BSC Mainnet")
-    pub url: String,                 // WebSocket RPC URL
-    pub address: String,             // Token contract address
+    pub name: String,                // Name of the network (e.g., "BSC Mainnet" or "Solana")
+    pub chain_type: Option<String>,  // "evm" or "solana" - defaults to "evm" for backward compatibility
+    pub url: String,                 // WebSocket RPC URL (wss:// for both EVM and Solana)
+    pub address: String,             // Token contract address (EVM) or Mint address (Solana)
     pub decimal: u8,                 // Number of decimals for the token
     pub explorer: Option<String>,    // Optional field for explorer URL
 }

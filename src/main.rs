@@ -1,8 +1,10 @@
-use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram};
+use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram, solana_adapter};
 use tokio::{sync::mpsc, select, signal::ctrl_c, time::{sleep, Duration, interval}};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::str::FromStr;
+use solana_sdk::pubkey::Pubkey;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,28 +19,77 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Spawn a producer task for each config entry with auto-reconnect
-    for (_key, entry) in configs {
-        let tx = tx.clone();
-        let rpc_url = entry.url.clone();
-        let contract_address = entry.address.clone();
-        let name = entry.name.clone();
-        let decimal = entry.decimal;
-        let explorer = entry.explorer.clone();
+    for (_, entry) in configs {
+        let chain_type = entry.chain_type.as_deref().unwrap_or("evm");
         
-        tokio::spawn(async move {
-            loop {
-                println!("[{}] Starting event listener...", name);
-                match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(), tx.clone()).await {
-                    Ok(_) => println!("[{}] Event stream ended normally", name),
-                    Err(e) => eprintln!("[{}] Error: {}. Reconnecting in 5s...", name, e),
-                }
-                sleep(Duration::from_secs(5)).await;
+        match chain_type {
+            "solana" => {
+                // Spawn Solana listener
+                let rpc_url = entry.url.clone();
+                // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
+                // We need WebSocket for subscriptions, so convert if needed
+                let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
+                    rpc_url.clone()
+                } else {
+                    rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+                };
+                
+                let mint = entry.address.clone();
+                let name = entry.name.clone();
+                let decimal = entry.decimal;
+                let explorer = entry.explorer.clone();
+                
+                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, rpc_url, ws_url, mint);
+                
+                tokio::spawn(async move {
+                    loop {
+                        println!("[{}] Starting Solana event listener...", name);
+                        
+                        // Parse token program ID (standard SPL Token)
+                        let token_program_id = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                            .expect("Invalid token program ID");
+                        
+                        match solana_adapter::get_detail_tx(
+                            rpc_url.clone(),
+                            ws_url.clone(),
+                            mint.clone(),
+                            decimal,
+                            explorer.clone(),
+                            token_program_id,
+                        ).await {
+                            Ok(_) => println!("[{}] Solana stream ended normally", name),
+                            Err(e) => eprintln!("[{}] Solana Error: {}. Reconnecting in 5s...", name, e),
+                        }
+                        
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                });
             }
-        });
+            "evm" | _ => {
+                // Spawn EVM listener (default)
+                let tx = tx.clone();
+                let rpc_url = entry.url.clone();
+                let contract_address = entry.address.clone();
+                let name = entry.name.clone();
+                let decimal = entry.decimal;
+                let explorer = entry.explorer.clone();
+                
+                tokio::spawn(async move {
+                    loop {
+                        println!("[{}] Starting EVM event listener...", name);
+                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(), tx.clone()).await {
+                            Ok(_) => println!("[{}] EVM stream ended normally", name),
+                            Err(e) => eprintln!("[{}] EVM Error: {}. Reconnecting in 5s...", name, e),
+                        }
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                });
+            }
+        }
     }
 
     // Spawn multiple consumer workers for parallel processing
-    let num_workers = 3;
+    let num_workers = 8;
     let rx = Arc::new(Mutex::new(rx));
     
     for worker_id in 0..num_workers {
