@@ -16,10 +16,27 @@ use std::{
     fs,
     collections::{HashMap, HashSet}
 };
+use once_cell::sync::OnceCell;
 use tokio::{
     sync::{Semaphore, RwLock},
     time::{sleep, timeout, Duration},
 };
+
+/// Global singleton Bot instance, initialized once on first use
+static TELEGRAM_BOT: OnceCell<Bot> = OnceCell::new();
+
+/// Get or initialize the Telegram bot instance (singleton pattern)
+fn get_telegram_bot() -> Result<&'static Bot, Box<dyn Error + Send + Sync>> {
+    TELEGRAM_BOT.get_or_try_init(|| {
+        // Load environment variables
+        from_path("src/asset/.env").ok();
+        
+        let bot_token = std::env::var("TELEGRAM_BOT_KEY")
+            .map_err(|_| "TELEGRAM_BOT_KEY not set")?;
+        
+        Ok::<Bot, Box<dyn Error + Send + Sync>>(Bot::new(bot_token))
+    })
+}
 
 /// Send Solana transfer notification to Telegram
 async fn send_solana_transfer_to_telegram(
@@ -29,20 +46,20 @@ async fn send_solana_transfer_to_telegram(
     tx_signature: &str,
     explorer_url: Option<&str>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Load environment variables
-    from_path("src/asset/.env").ok();
-
     let explorer = explorer_url.unwrap_or("https://solscan.io");
     
     let source_link = format!(r#"<a href="{}/account/{}">{}...</a>"#, explorer, source, &source[..8]);
     let dest_link = format!(r#"<a href="{}/account/{}">{}...</a>"#, explorer, destination, &destination[..8]);
     let tx_link = format!(r#"<a href="{}/tx/{}">Detail</a>"#, explorer, tx_signature);
 
+    // Load environment variables for chat ID
+    from_path("src/asset/.env").ok();
     let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
         .map_err(|_| "TELEGRAM_CHAT_ID not set")?.parse()
         .map_err(|_| "Invalid TELEGRAM_CHAT_ID")?;
 
-    let bot = Bot::new(&std::env::var("TELEGRAM_BOT_KEY").map_err(|_| "TELEGRAM_BOT_KEY not set")?);
+    // Get the shared bot instance (created only once)
+    let bot = get_telegram_bot()?;
 
     let text = format!(
         "🟣 <b>Solana Transfer</b>\n\nFrom: {}\nTo: {}\n💰 Amount: {}\n📝 Tx: {}",
