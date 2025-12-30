@@ -5,6 +5,7 @@ A Rust-based service for monitoring ERC-20 token Transfer events on multiple blo
 ## Features
 
 - Listens for ERC-20 `Transfer` events on multiple EVM-compatible blockchains (Ethereum, BSC, Viction, etc.)
+- Listen for SPL-token `Transfer` on Solana
 - Uses WebSocket RPC endpoints for real-time event streaming
 - Sends detailed, clickable notifications to a Telegram chat, including:
   - From/To addresses (with explorer links)
