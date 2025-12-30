@@ -73,6 +73,7 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
 
         // Send the transfer event to the channel
         if tx.send(transfer_event).await.is_err() {
+            println!("🔍 Detected transaction: {}", tx_hash);
             eprintln!("Failed to send transfer event");
         }
     }

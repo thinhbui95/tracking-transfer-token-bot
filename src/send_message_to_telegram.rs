@@ -2,6 +2,23 @@ use teloxide::{ Bot, requests::Requester, payloads::SendMessageSetters };
 use dotenv::from_path;
 use ethers::core::types::Address;
 use ethers::prelude::*;
+use once_cell::sync::OnceCell;
+
+/// Global singleton Bot instance, initialized once on first use
+static TELEGRAM_BOT: OnceCell<Bot> = OnceCell::new();
+
+/// Get or initialize the Telegram bot instance (singleton pattern)
+fn get_telegram_bot() -> Result<&'static Bot, Box<dyn std::error::Error + Send + Sync>> {
+    TELEGRAM_BOT.get_or_try_init(|| {
+        // Load environment variables
+        from_path("src/asset/.env").ok();
+        
+        let bot_token = std::env::var("TELEGRAM_BOT_KEY")
+            .map_err(|_| "TELEGRAM_BOT_KEY not set")?;
+        
+        Ok::<Bot, Box<dyn std::error::Error + Send + Sync>>(Bot::new(bot_token))
+    })
+}
 
 /// Struct representing the message to be sent to Telegram.
 #[derive(Debug)]
@@ -20,11 +37,6 @@ pub struct Message {
 pub async fn send_message(message: &Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load environment variables from the custom .env path
     from_path("src/asset/.env").ok();
-
-    // Ensure the TELEGRAM_BOT_KEY is set
-    if std::env::var("TELEGRAM_BOT_KEY").is_err() {
-        return Err("TELEGRAM_BOT_KEY is not set".into());
-    }
 
     let explorer_url = message.explorer.clone().unwrap_or_default();
     let from_link = format!(
@@ -46,7 +58,8 @@ pub async fn send_message(message: &Message) -> Result<(), Box<dyn std::error::E
         .parse()
         .map_err(|_| "TELEGRAM_CHAT_ID is not a valid i64")?;
 
-    let bot = Bot::new(&std::env::var("TELEGRAM_BOT_KEY").unwrap());
+    // Get the shared bot instance (created only once)
+    let bot = get_telegram_bot()?;
 
     // Send the message with HTML parse mode
     let text = format!(
