@@ -95,11 +95,14 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_workers = 8;
     let rx = Arc::new(Mutex::new(rx));
     
+    // Shared deduplication cache across all workers to prevent duplicates
+    let seen_hashes = Arc::new(StdMutex::new(HashSet::<String>::new()));
+    
     for worker_id in 0..num_workers {
         let rx = Arc::clone(&rx);
+        let seen_hashes = Arc::clone(&seen_hashes);
         tokio::spawn(async move {
             let mut batch: Vec<get_event::TransferEvent> = Vec::new();
-            let mut seen_hashes: HashSet<String> = HashSet::new();
             let mut batch_interval = interval(Duration::from_secs(2));
             batch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
@@ -120,15 +123,18 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         let tx_hash_str = format!("{:#x}", event.tx_hash);
                         
-                        // Deduplication: skip if already processed
-                        if seen_hashes.contains(&tx_hash_str) {
-                            continue;
-                        }
-                        seen_hashes.insert(tx_hash_str);
-                        
-                        // Limit dedup cache size
-                        if seen_hashes.len() > 1000 {
-                            seen_hashes.clear();
+                        // Deduplication: skip if already processed (shared across all workers)
+                        {
+                            let mut cache = seen_hashes.lock().unwrap();
+                            if cache.contains(&tx_hash_str) {
+                                continue;
+                            }
+                            cache.insert(tx_hash_str);
+                            
+                            // Limit dedup cache size
+                            if cache.len() > 1000 {
+                                cache.clear();
+                            }
                         }
                         
                         batch.push(event);
