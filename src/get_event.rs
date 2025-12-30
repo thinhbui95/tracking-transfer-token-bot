@@ -5,6 +5,8 @@ use ethers_providers::Provider;
 use ethers_providers::Ws;
 use ethers::prelude::*;
 use tokio::sync::mpsc;
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 // Struct representing a decoded ERC-20 Transfer event.
 #[derive(Debug)]
@@ -41,7 +43,7 @@ async fn get_provider(url: &str) -> Provider<Ws> {
 /// - `decimal`: Number of decimals for the token (for human-readable value).
 /// - `explorer`: Optional block explorer URL for formatting links.
 /// - `tx`: Channel sender to forward decoded TransferEvent structs.
-pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, sent_notifications: Arc<Mutex<HashSet<String>>>,tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
     let provider = get_provider(rpc).await;
     let client = Arc::new(provider);
     // Build a filter for the Transfer event of the specified contract.
@@ -61,6 +63,14 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
         let to: Address = Address::from(log.topics[2]);
         let value: U256 = U256::decode(log.data.as_ref()).unwrap();
         let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
+        let notification_key = format!("{}:{}:{}:{}", from, to, value, tx_hash);
+
+        {
+            let cache = sent_notifications.lock().unwrap();
+            if cache.contains(&notification_key) {
+                continue; // Already sent, skip
+            }
+        }
 
         // Convert value to human-readable float using the token's decimals.
         let transfer_event = TransferEvent {
@@ -73,8 +83,17 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
 
         // Send the transfer event to the channel
         if tx.send(transfer_event).await.is_err() {
-            println!("🔍 Detected transaction: {}", tx_hash);
             eprintln!("Failed to send transfer event");
+        } else {
+            println!("🔍 Detected transaction: {}", tx_hash);
+            // Mark this notification as sent
+            let mut cache = sent_notifications.lock().unwrap();
+            cache.insert(notification_key);
+
+            // Prevent cache from growing too large
+            if cache.len() > 10000 {
+                cache.clear();
+            }
         }
     }
     Ok(())

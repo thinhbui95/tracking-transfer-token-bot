@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::str::FromStr;
 use solana_sdk::pubkey::Pubkey;
+use std::sync::Mutex as StdMutex;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,11 +74,13 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let name = entry.name.clone();
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
+                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
                 
                 tokio::spawn(async move {
                     loop {
                         println!("[{}] Starting EVM event listener...", name);
-                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(), tx.clone()).await {
+                        let sent_notifications = Arc::clone(&sent_notifications);
+                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(),sent_notifications, tx.clone()).await {
                             Ok(_) => println!("[{}] EVM stream ended normally", name),
                             Err(e) => eprintln!("[{}] EVM Error: {}. Reconnecting in 5s...", name, e),
                         }
