@@ -32,9 +32,11 @@ impl Default for TransferEvent {
 
 
 // Helper function to create a WebSocket provider for the given URL.
-async fn get_provider(url: &str) -> Provider<Ws> {
-    let ws = Ws::connect(url).await.expect("Failed to connect to WebSocket");
-    Provider::new(ws)
+async fn get_provider(url: &str) -> Result<Provider<Ws>, Box<dyn std::error::Error>> {
+    println!("🔌 Connecting to {}", url);
+    let ws = Ws::connect(url).await
+        .map_err(|e| format!("WebSocket connection failed: {}", e))?;
+    Ok(Provider::new(ws))
 }
 
 /// Listens for Transfer events on the given contract and sends them through the channel.
@@ -44,17 +46,25 @@ async fn get_provider(url: &str) -> Provider<Ws> {
 /// - `explorer`: Optional block explorer URL for formatting links.
 /// - `tx`: Channel sender to forward decoded TransferEvent structs.
 pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, sent_notifications: Arc<Mutex<HashSet<String>>>,tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = get_provider(rpc).await;
+    let provider = get_provider(rpc).await?;
     let client = Arc::new(provider);
+    
     // Build a filter for the Transfer event of the specified contract.
+    println!("📋 Parsing contract address: {}", contract_address);
+    let contract_addr = contract_address.parse::<Address>()
+        .map_err(|e| format!("Invalid contract address '{}': {}", contract_address, e))?;
+    
     let filter = Filter::new()
-        .address(contract_address.parse::<Address>().unwrap())
+        .address(contract_addr)
         .event("Transfer(address,address,uint256)");
     
+    println!("📡 Subscribing to Transfer events on {}...", rpc);
     // Subscribe to the event logs using the filter.
     let mut stream = client.subscribe_logs(&filter)
         .await
-        .unwrap();
+        .map_err(|e| format!("Subscription failed: {}", e))?;
+    
+    println!("✅ Successfully subscribed! Listening for events on {}...", rpc);
 
     // Process each log entry as it arrives.
     while let Some(log) = stream.next().await {

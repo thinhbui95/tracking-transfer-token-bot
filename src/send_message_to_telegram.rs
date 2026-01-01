@@ -8,7 +8,7 @@ use once_cell::sync::OnceCell;
 static TELEGRAM_BOT: OnceCell<Bot> = OnceCell::new();
 
 /// Get or initialize the Telegram bot instance (singleton pattern)
-fn get_telegram_bot() -> Result<&'static Bot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn get_telegram_bot() -> Result<&'static Bot, Box<dyn std::error::Error + Send + Sync>> {
     TELEGRAM_BOT.get_or_try_init(|| {
         // Load environment variables
         from_path("src/asset/.env").ok();

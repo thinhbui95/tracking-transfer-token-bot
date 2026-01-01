@@ -1,11 +1,7 @@
 use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram, solana_adapter};
-use tokio::{sync::mpsc, select, signal::ctrl_c, time::{sleep, Duration, interval}};
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::str::FromStr;
+use tokio::{sync::{mpsc, Mutex}, select, signal::ctrl_c, time::{sleep, Duration, interval}};
+use std::{collections::HashSet, sync::{Mutex as StdMutex,Arc}, str::FromStr};
 use solana_sdk::pubkey::Pubkey;
-use std::sync::Mutex as StdMutex;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,6 +38,11 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, rpc_url, ws_url, mint);
                 
+                // Create persistent caches that survive reconnections
+                let processed_txs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<String, bool>::new()));
+                let verified_accounts = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                
                 tokio::spawn(async move {
                     loop {
                         println!("[{}] Starting Solana event listener...", name);
@@ -57,6 +58,9 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             decimal,
                             explorer.clone(),
                             token_program_id,
+                            Arc::clone(&processed_txs),
+                            Arc::clone(&verified_accounts),
+                            Arc::clone(&sent_notifications),
                         ).await {
                             Ok(_) => println!("[{}] Solana stream ended normally", name),
                             Err(e) => eprintln!("[{}] Solana Error: {}. Reconnecting in 5s...", name, e),
@@ -66,7 +70,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             }
-            "evm" | _ => {
+            "evm" | _  => {
                 // Spawn EVM listener (default)
                 let tx = tx.clone();
                 let rpc_url = entry.url.clone();
