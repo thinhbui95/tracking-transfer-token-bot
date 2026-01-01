@@ -4,9 +4,13 @@ use ethers::core::types::{ Filter, U256, Address};
 use ethers_providers::Provider;
 use ethers_providers::Ws;
 use ethers::prelude::*;
-use tokio::sync::mpsc;
-use std::collections::HashSet;
-use std::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
+use std::collections::{HashSet, HashMap};
+use once_cell::sync::Lazy;
+
+/// Global provider cache: one provider per WebSocket URL
+static PROVIDERS: Lazy<Mutex<HashMap<String, Arc<Provider<Ws>>>>> = 
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Struct representing a decoded ERC-20 Transfer event.
 #[derive(Debug)]
@@ -31,12 +35,35 @@ impl Default for TransferEvent {
 }
 
 
-// Helper function to create a WebSocket provider for the given URL.
-async fn get_provider(url: &str) -> Result<Provider<Ws>, Box<dyn std::error::Error>> {
-    println!("🔌 Connecting to {}", url);
+/// Get or create a cached WebSocket provider for the given URL (singleton pattern per URL)
+async fn get_provider(url: &str) -> Result<Arc<Provider<Ws>>, Box<dyn std::error::Error>> {
+    let mut providers = PROVIDERS.lock().await;
+    
+    // Check if we already have a provider for this URL
+    if let Some(provider) = providers.get(url) {
+        println!("♻️  Reusing existing provider for {}", url);
+        return Ok(Arc::clone(provider));
+    }
+    
+    // Create new provider if not cached
+    println!("🔌 Creating new WebSocket connection to {}", url);
     let ws = Ws::connect(url).await
         .map_err(|e| format!("WebSocket connection failed: {}", e))?;
-    Ok(Provider::new(ws))
+    let provider = Arc::new(Provider::new(ws));
+    
+    // Cache it for future use
+    providers.insert(url.to_string(), Arc::clone(&provider));
+    println!("✅ Provider created and cached for {}", url);
+    
+    Ok(provider)
+}
+
+/// Remove a dead provider from cache (called when connection fails)
+async fn remove_provider(url: &str) {
+    let mut providers = PROVIDERS.lock().await;
+    if providers.remove(url).is_some() {
+        println!("🗑️  Removed dead provider for {} from cache", url);
+    }
 }
 
 /// Listens for Transfer events on the given contract and sends them through the channel.
@@ -45,9 +72,16 @@ async fn get_provider(url: &str) -> Result<Provider<Ws>, Box<dyn std::error::Err
 /// - `decimal`: Number of decimals for the token (for human-readable value).
 /// - `explorer`: Optional block explorer URL for formatting links.
 /// - `tx`: Channel sender to forward decoded TransferEvent structs.
-pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8, explorer: Option<String>, sent_notifications: Arc<Mutex<HashSet<String>>>,tx: mpsc::Sender<TransferEvent>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn get_transfer_events(
+    rpc: &str, 
+    contract_address: &str, 
+    decimal: u8, 
+    explorer: Option<String>, 
+    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    tx: mpsc::Sender<TransferEvent>
+) -> Result<(), Box<dyn std::error::Error>> {
     let provider = get_provider(rpc).await?;
-    let client = Arc::new(provider);
+    let client = provider;
     
     // Build a filter for the Transfer event of the specified contract.
     println!("📋 Parsing contract address: {}", contract_address);
@@ -60,11 +94,17 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
     
     println!("📡 Subscribing to Transfer events on {}...", rpc);
     // Subscribe to the event logs using the filter.
-    let mut stream = client.subscribe_logs(&filter)
-        .await
-        .map_err(|e| format!("Subscription failed: {}", e))?;
-    
-    println!("✅ Successfully subscribed! Listening for events on {}...", rpc);
+    let mut stream = match client.subscribe_logs(&filter).await {
+        Ok(s) => {
+            println!("✅ Successfully subscribed! Listening for events on {}...", rpc);
+            s
+        }
+        Err(e) => {
+            // Remove dead provider from cache on subscription failure
+            remove_provider(rpc).await;
+            return Err(format!("Subscription failed: {}", e).into());
+        }
+    };
 
     // Process each log entry as it arrives.
     while let Some(log) = stream.next().await {
@@ -76,7 +116,7 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
         let notification_key = format!("{}:{}:{}:{}", from, to, value, tx_hash);
 
         {
-            let cache = sent_notifications.lock().unwrap();
+            let cache = sent_notifications.lock().await;
             if cache.contains(&notification_key) {
                 continue; // Already sent, skip
             }
@@ -97,7 +137,7 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
         } else {
             println!("🔍 Detected transaction: {}", tx_hash);
             // Mark this notification as sent
-            let mut cache = sent_notifications.lock().unwrap();
+            let mut cache = sent_notifications.lock().await;
             cache.insert(notification_key);
 
             // Prevent cache from growing too large
@@ -106,6 +146,10 @@ pub async fn get_transfer_events(rpc: &str, contract_address: &str, decimal: u8,
             }
         }
     }
+    
+    // Stream ended - remove provider from cache so it reconnects fresh
+    println!("⚠️  Event stream ended for {}", rpc);
+    remove_provider(rpc).await;
     Ok(())
 }
 

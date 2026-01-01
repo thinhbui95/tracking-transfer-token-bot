@@ -78,7 +78,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let name = entry.name.clone();
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
-                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(Mutex::new(HashSet::<String>::new()));
                 
                 tokio::spawn(async move {
                     loop {
