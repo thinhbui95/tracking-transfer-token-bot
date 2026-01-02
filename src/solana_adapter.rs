@@ -28,7 +28,18 @@ use crate::RoundRobin;
 static RPC_LIST: OnceCell<Arc<Vec<String>>> = OnceCell::new();
 static RPC_CLIENT_SELECTOR: OnceCell<Arc<RoundRobin<Arc<AsyncRpcClient>>>> = OnceCell::new();
 static REQUEST_SEMAPHORE: OnceCell<Arc<Semaphore>> = OnceCell::new();
+static CHAT_ID: OnceCell<i64> = OnceCell::new();
 
+/// Get or initialize the chat ID (singleton pattern)
+fn get_chat_id() -> Result<i64, Box<dyn Error>> {
+    CHAT_ID.get_or_try_init(|| {
+        from_path("src/asset/.env").ok();
+        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
+            .map_err(|_| "TELEGRAM_CHAT_ID not set")?.parse()
+            .map_err(|_| "Invalid TELEGRAM_CHAT_ID")?;
+        Ok(chat_id)
+    }).map(|id| *id)
+}
 
 /// Get or initialize the RPC list (singleton pattern)
 fn get_rpc_list() -> Result<Arc<Vec<String>>, Box<dyn Error>> {
@@ -78,10 +89,7 @@ async fn send_solana_transfer_to_telegram(
     let tx_link = format!(r#"<a href="{}/tx/{}">Detail</a>"#, explorer, tx_signature);
 
     // Load environment variables for chat ID
-    from_path("src/asset/.env").ok();
-    let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-        .map_err(|_| "TELEGRAM_CHAT_ID not set")?.parse()
-        .map_err(|_| "Invalid TELEGRAM_CHAT_ID")?;
+    let chat_id: i64 = get_chat_id().unwrap();
 
     // Get the shared bot instance (created only once)
     let bot = send_message_to_telegram::get_telegram_bot()?;
