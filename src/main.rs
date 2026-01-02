@@ -23,8 +23,8 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match chain_type {
             "solana" => {
                 // Spawn Solana listener
-                let wsses = entry.get_wsses();
-                let wss_url = wsses.first().cloned().unwrap_or_default();
+                let wss_urls = entry.get_wss_urls();
+                let wss_url = wss_urls.first().cloned().unwrap_or_default();
                 // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
                 // We need WebSocket for subscriptions, so convert if needed
                 let ws_url = if wss_url.starts_with("wss://") || wss_url.starts_with("ws://") {
@@ -75,7 +75,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "evm" | _  => {
                 // Spawn EVM listener (default)
                 let tx = tx.clone();
-                let wss_urls = entry.get_wsses();
+                let wss_urls = entry.get_wss_urls();
                 
                 if wss_urls.is_empty() {
                     eprintln!("[{}] No RPC URLs configured, skipping", entry.name);
