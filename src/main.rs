@@ -23,14 +23,14 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match chain_type {
             "solana" => {
                 // Spawn Solana listener
-                let urls = entry.get_urls();
-                let rpc_url = urls.first().cloned().unwrap_or_default();
+                let wsses = entry.get_wsses();
+                let wss_url = wsses.first().cloned().unwrap_or_default();
                 // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
                 // We need WebSocket for subscriptions, so convert if needed
-                let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
-                    rpc_url.clone()
+                let ws_url = if wss_url.starts_with("wss://") || wss_url.starts_with("ws://") {
+                    wss_url.clone()
                 } else {
-                    rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+                    wss_url.replace("https://", "wss://").replace("http://", "ws://")
                 };
                 
                 let mint = entry.address.clone();
@@ -38,7 +38,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
                 
-                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, rpc_url, ws_url, mint);
+                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, wss_url, ws_url, mint);
                 
                 // Create persistent caches that survive reconnections
                 let processed_txs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<String, bool>::new()));
@@ -54,7 +54,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .expect("Invalid token program ID");
                         
                         match solana_adapter::get_detail_tx(
-                            rpc_url.clone(),
+                            wss_url.clone(),
                             ws_url.clone(),
                             mint.clone(),
                             decimal,
@@ -75,9 +75,9 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "evm" | _  => {
                 // Spawn EVM listener (default)
                 let tx = tx.clone();
-                let rpc_urls = entry.get_urls();
+                let wss_urls = entry.get_wsses();
                 
-                if rpc_urls.is_empty() {
+                if wss_urls.is_empty() {
                     eprintln!("[{}] No RPC URLs configured, skipping", entry.name);
                     continue;
                 }
@@ -88,11 +88,11 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let explorer = entry.explorer.clone();
                 
                 // Create persistent resources that survive reconnections
-                let selector = Arc::new(RoundRobin::new(rpc_urls.clone()));
+                let selector = Arc::new(RoundRobin::new(wss_urls.clone()));
                 let sent_notifications = Arc::new(Mutex::new(HashSet::<String>::new()));
                 
                 println!("[{}] EVM config: {} WebSocket endpoint(s), Contract={}", 
-                         name, rpc_urls.len(), contract_address);
+                         name, wss_urls.len(), contract_address);
                 
                 tokio::spawn(async move {
                     loop {

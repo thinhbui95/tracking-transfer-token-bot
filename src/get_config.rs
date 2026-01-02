@@ -8,21 +8,21 @@ pub struct Config {
     pub name: String,                // Name of the network (e.g., "BSC Mainnet" or "Solana")
     pub chain_type: Option<String>,  // "evm" or "solana" - defaults to "evm" for backward compatibility
     #[serde(default)]
-    pub url: Option<String>,         // Single WebSocket RPC URL (backward compatibility)
+    pub wss: Option<String>,         // Single WebSocket RPC URL (backward compatibility)
     #[serde(default)]
-    pub urls: Option<Vec<String>>,   // Multiple WebSocket URLs for load balancing/failover
+    pub wsses: Option<Vec<String>>,   // Multiple WebSocket URLs for load balancing/failover
     pub address: String,             // Token contract address (EVM) or Mint address (Solana)
     pub decimal: u8,                 // Number of decimals for the token
     pub explorer: Option<String>,    // Optional field for explorer URL
 }
 
 impl Config {
-    /// Get all RPC URLs (handles both single url and urls array)
-    pub fn get_urls(&self) -> Vec<String> {
-        if let Some(urls) = &self.urls {
-            urls.clone()
-        } else if let Some(url) = &self.url {
-            vec![url.clone()]
+    /// Get all WSSs (handles both single url and urls array)
+    pub fn get_wsses(&self) -> Vec<String> {
+        if let Some(wsses) = &self.wsses {
+            wsses.clone()
+        } else if let Some(wss) = &self.wss {
+            vec![wss.clone()]
         } else {
             vec![]
         }

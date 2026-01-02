@@ -38,33 +38,33 @@ impl Default for TransferEvent {
 
 
 /// Get or create a cached WebSocket provider for the given URL (singleton pattern per URL)
-async fn get_provider(url: &str) -> Result<Arc<Provider<Ws>>, Box<dyn std::error::Error + Send + Sync>> {
+async fn get_provider(wss: &str) -> Result<Arc<Provider<Ws>>, Box<dyn std::error::Error + Send + Sync>> {
     let mut providers = PROVIDERS.lock().await;
     
     // Check if we already have a provider for this URL
-    if let Some(provider) = providers.get(url) {
-        println!("♻️  Reusing existing provider for {}", url);
+    if let Some(provider) = providers.get(wss) {
+        println!("♻️  Reusing existing provider for {}", wss);
         return Ok(Arc::clone(provider));
     }
     
     // Create new provider if not cached
-    println!("🔌 Creating new WebSocket connection to {}", url);
-    let ws = Ws::connect(url).await
+    println!("🔌 Creating new WebSocket connection to {}", wss);
+    let ws = Ws::connect(wss).await
         .map_err(|e| format!("WebSocket connection failed: {}", e))?;
     let provider = Arc::new(Provider::new(ws));
     
     // Cache it for future use
-    providers.insert(url.to_string(), Arc::clone(&provider));
-    println!("✅ Provider created and cached for {}", url);
+    providers.insert(wss.to_string(), Arc::clone(&provider));
+    println!("✅ Provider created and cached for {}", wss);
     
     Ok(provider)
 }
 
 /// Remove a dead provider from cache (called when connection fails)
-async fn remove_provider(url: &str) {
+async fn remove_provider(wss: &str) {
     let mut providers = PROVIDERS.lock().await;
-    if providers.remove(url).is_some() {
-        println!("🗑️  Removed dead provider for {} from cache", url);
+    if providers.remove(wss).is_some() {
+        println!("🗑️  Removed dead provider for {} from cache", wss);
     }
 }
 
@@ -84,17 +84,17 @@ pub async fn get_transfer_events_with_load_balancer(
     let max_retries = selector.len() * 2; // Try each endpoint at least twice
     
     for attempt in 0..max_retries {
-        let current_url = match selector.next() {
-            Some(url) => url,
+        let current_wss = match selector.next() {
+            Some(wss) => wss,
             None => return Err("No URLs available".into()),
         };
         let endpoint_num = (attempt % selector.len()) + 1;
         
         println!("[Attempt {}/{}] Trying endpoint {}/{}: {}", 
-                 attempt + 1, max_retries, endpoint_num, selector.len(), current_url);
+                 attempt + 1, max_retries, endpoint_num, selector.len(), current_wss);
         
         match get_transfer_events(
-            &current_url,
+            &current_wss,
             contract_address,
             decimal,
             explorer.clone(),
@@ -103,15 +103,15 @@ pub async fn get_transfer_events_with_load_balancer(
         ).await {
             Ok(_) => {
                 // Connection ended normally, try next endpoint
-                println!("⚠️  Connection to {} ended, rotating to next endpoint...", current_url);
+                println!("⚠️  Connection to {} ended, rotating to next endpoint...", current_wss);
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 continue;
             }
             Err(e) => {
-                eprintln!("❌ Error on {}: {}. Trying next endpoint...", current_url, e);
+                eprintln!("❌ Error on {}: {}. Trying next endpoint...", current_wss, e);
                 // Note: We keep the provider in cache - it might work on next attempt
                 // If you want to force fresh connections on error, uncomment:
-                // remove_provider(&current_url).await;
+                // remove_provider(&current_wss).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 continue;
             }
@@ -128,14 +128,14 @@ pub async fn get_transfer_events_with_load_balancer(
 /// - `explorer`: Optional block explorer URL for formatting links.
 /// - `tx`: Channel sender to forward decoded TransferEvent structs.
 pub async fn get_transfer_events(
-    rpc: &str, 
+    wss: &str, 
     contract_address: &str, 
     decimal: u8, 
     explorer: Option<String>, 
     sent_notifications: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let provider = get_provider(rpc).await?;
+    let provider = get_provider(wss).await?;
     let client = provider;
     
     // Build a filter for the Transfer event of the specified contract.
@@ -147,16 +147,16 @@ pub async fn get_transfer_events(
         .address(contract_addr)
         .event("Transfer(address,address,uint256)");
     
-    println!("📡 Subscribing to Transfer events on {}...", rpc);
+    println!("📡 Subscribing to Transfer events on {}...", wss);
     // Subscribe to the event logs using the filter.
     let mut stream = match client.subscribe_logs(&filter).await {
         Ok(s) => {
-            println!("✅ Successfully subscribed! Listening for events on {}...", rpc);
+            println!("✅ Successfully subscribed! Listening for events on {}...", wss);
             s
         }
         Err(e) => {
             // Remove dead provider from cache on subscription failure
-            remove_provider(rpc).await;
+            remove_provider(wss).await;
             return Err(format!("Subscription failed: {}", e).into());
         }
     };
@@ -165,7 +165,7 @@ pub async fn get_transfer_events(
     while let Some(log) = stream.next().await {
         // Safely extract transaction data with error handling
         if log.topics.len() < 3 {
-            eprintln!("⚠️  [{}] Invalid log: not enough topics", rpc);
+            eprintln!("⚠️  [{}] Invalid log: not enough topics", wss);
             continue; // Skip this event, keep listening
         }
         
@@ -175,7 +175,7 @@ pub async fn get_transfer_events(
         let value: U256 = match U256::decode(log.data.as_ref()) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("⚠️  [{}] Failed to decode value: {}. Skipping event.", rpc, e);
+                eprintln!("⚠️  [{}] Failed to decode value: {}. Skipping event.", wss, e);
                 continue; // Skip this event, keep listening
             }
         };
@@ -201,10 +201,10 @@ pub async fn get_transfer_events(
 
         // Send the transfer event to the channel
         if tx.send(transfer_event).await.is_err() {
-            eprintln!("❌ [{}] Channel closed, ending stream", rpc);
+            eprintln!("❌ [{}] Channel closed, ending stream", wss);
             break; // Channel closed, exit gracefully
         } else {
-            println!("🔍 [{}] Detected transaction: {}", rpc, tx_hash);
+            println!("🔍 [{}] Detected transaction: {}", wss, tx_hash);
             // Mark this notification as sent
             let mut cache = sent_notifications.lock().await;
             cache.insert(notification_key);
@@ -217,8 +217,8 @@ pub async fn get_transfer_events(
     }
     
     // Stream ended - remove provider from cache so it reconnects fresh
-    println!("⚠️  Event stream ended for {}", rpc);
-    remove_provider(rpc).await;
+    println!("⚠️  Event stream ended for {}", wss);
+    remove_provider(wss).await;
     Ok(())
 }
 
