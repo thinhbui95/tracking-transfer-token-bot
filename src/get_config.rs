@@ -7,10 +7,26 @@ use serde::{ Deserialize , Serialize };
 pub struct Config {
     pub name: String,                // Name of the network (e.g., "BSC Mainnet" or "Solana")
     pub chain_type: Option<String>,  // "evm" or "solana" - defaults to "evm" for backward compatibility
-    pub url: String,                 // WebSocket RPC URL (wss:// for both EVM and Solana)
+    #[serde(default)]
+    pub wss_url: Option<String>,         // Single WebSocket RPC URL (backward compatibility)
+    #[serde(default)]
+    pub wss_urls: Option<Vec<String>>,   // Multiple WebSocket URLs for load balancing/failover
     pub address: String,             // Token contract address (EVM) or Mint address (Solana)
     pub decimal: u8,                 // Number of decimals for the token
     pub explorer: Option<String>,    // Optional field for explorer URL
+}
+
+impl Config {
+    /// Get all WSSs (handles both single url and urls array)
+    pub fn get_wss_urls(&self) -> Vec<String> {
+        if let Some(wss_urls) = &self.wss_urls {
+            wss_urls.clone()
+        } else if let Some(wss_url) = &self.wss_url {
+            vec![wss_url.clone()]
+        } else {
+            vec![]
+        }
+    }
 }
 
 // Add a new config entry to config.json

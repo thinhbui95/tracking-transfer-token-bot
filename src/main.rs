@@ -1,11 +1,8 @@
 use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram, solana_adapter};
-use tokio::{sync::mpsc, select, signal::ctrl_c, time::{sleep, Duration, interval}};
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::str::FromStr;
+use tokio::{sync::{mpsc, Mutex}, select, signal::ctrl_c, time::{sleep, Duration, interval}};
+use std::{collections::HashSet, sync::{Mutex as StdMutex,Arc}, str::FromStr};
 use solana_sdk::pubkey::Pubkey;
-use std::sync::Mutex as StdMutex;
+use tracking_transfer_token_bot::RoundRobin;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,13 +23,14 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match chain_type {
             "solana" => {
                 // Spawn Solana listener
-                let rpc_url = entry.url.clone();
+                let wss_urls = entry.get_wss_urls();
+                let wss_url = wss_urls.first().cloned().unwrap_or_default();
                 // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
                 // We need WebSocket for subscriptions, so convert if needed
-                let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
-                    rpc_url.clone()
+                let ws_url = if wss_url.starts_with("wss://") || wss_url.starts_with("ws://") {
+                    wss_url.clone()
                 } else {
-                    rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+                    wss_url.replace("https://", "wss://").replace("http://", "ws://")
                 };
                 
                 let mint = entry.address.clone();
@@ -40,7 +38,12 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
                 
-                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, rpc_url, ws_url, mint);
+                println!("[{}] Solana config: RPC={}, WS={}, Mint={}", name, wss_url, ws_url, mint);
+                
+                // Create persistent caches that survive reconnections
+                let processed_txs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<String, bool>::new()));
+                let verified_accounts = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
                 
                 tokio::spawn(async move {
                     loop {
@@ -51,12 +54,15 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .expect("Invalid token program ID");
                         
                         match solana_adapter::get_detail_tx(
-                            rpc_url.clone(),
+                            wss_url.clone(),
                             ws_url.clone(),
                             mint.clone(),
                             decimal,
                             explorer.clone(),
                             token_program_id,
+                            Arc::clone(&processed_txs),
+                            Arc::clone(&verified_accounts),
+                            Arc::clone(&sent_notifications),
                         ).await {
                             Ok(_) => println!("[{}] Solana stream ended normally", name),
                             Err(e) => eprintln!("[{}] Solana Error: {}. Reconnecting in 5s...", name, e),
@@ -66,22 +72,42 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             }
-            "evm" | _ => {
+            "evm" | _  => {
                 // Spawn EVM listener (default)
                 let tx = tx.clone();
-                let rpc_url = entry.url.clone();
+                let wss_urls = entry.get_wss_urls();
+                
+                if wss_urls.is_empty() {
+                    eprintln!("[{}] No RPC URLs configured, skipping", entry.name);
+                    continue;
+                }
+                
                 let contract_address = entry.address.clone();
                 let name = entry.name.clone();
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
-                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                
+                // Create persistent resources that survive reconnections
+                let selector = Arc::new(RoundRobin::new(wss_urls.clone()));
+                let sent_notifications = Arc::new(Mutex::new(HashSet::<String>::new()));
+                
+                println!("[{}] EVM config: {} WebSocket endpoint(s), Contract={}", 
+                         name, wss_urls.len(), contract_address);
                 
                 tokio::spawn(async move {
                     loop {
-                        println!("[{}] Starting EVM event listener...", name);
+                        println!("[{}] Starting EVM event listener with {} endpoint(s)...", name, selector.len());
                         let sent_notifications = Arc::clone(&sent_notifications);
-                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(),sent_notifications, tx.clone()).await {
-                            Ok(_) => println!("[{}] EVM stream ended normally", name),
+                        
+                        match get_event::get_transfer_events_with_load_balancer(
+                            Arc::clone(&selector),
+                            &contract_address,
+                            decimal,
+                            explorer.clone(),
+                            sent_notifications,
+                            tx.clone()
+                        ).await {
+                            Ok(_) => println!("[{}] All EVM endpoints exhausted", name),
                             Err(e) => eprintln!("[{}] EVM Error: {}. Reconnecting in 5s...", name, e),
                         }
                         sleep(Duration::from_secs(5)).await;

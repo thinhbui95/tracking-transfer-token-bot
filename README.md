@@ -25,7 +25,10 @@ Edit `src/asset/config.json` to add or update networks:
   "BSC Mainnet": {
     "name": "BSC Mainnet",
     "chain_type": "evm",
-    "url": "wss://bsc-rpc.publicnode.com",
+    "wsses": [
+      "wss://bsc-rpc.publicnode.com",
+      "wss://bsc.drpc.org"
+    ],
     "address": "",
     "decimal": 18,
     "explorer": "https://bscscan.com"
@@ -33,7 +36,9 @@ Edit `src/asset/config.json` to add or update networks:
   "VICTION": {
     "name": "VICTION",
     "chain_type": "evm",
-    "url": "wss://viction.drpc.org",
+    "wsses": [
+      "wss://viction.drpc.org"
+    ],
     "address": "",
     "decimal": 18,
     "explorer": "https://vicscan.xyz"
@@ -41,7 +46,11 @@ Edit `src/asset/config.json` to add or update networks:
   "ETHEREUM": {
     "name": "ETHEREUM",
     "chain_type": "evm",
-    "url": "wss://ethereum-rpc.publicnode.com",
+    "wsses": [
+      "wss://0xrpc.io/eth",
+      "wss://ethereum-rpc.publicnode.com",
+      "wss://mainnet.gateway.tenderly.co"
+    ],
     "address": "",
     "decimal": 18,
     "explorer": "https://etherscan.io"
@@ -49,7 +58,7 @@ Edit `src/asset/config.json` to add or update networks:
   "SOLANA": {
     "name": "SOLANA",
     "chain_type": "solana",
-    "url": "wss://api.mainnet-beta.solana.com",
+    "wss": "wss://api.mainnet-beta.solana.com",
     "address": "",
     "decimal": 6,
     "explorer": "https://solscan.io"

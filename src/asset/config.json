@@ -1,16 +1,10 @@
 {
-  "BSC Mainnet": {
-    "name": "BSC Mainnet",
-    "chain_type": "evm",
-    "url": "wss://bsc-rpc.publicnode.com",
-    "address": "",
-    "decimal": 18,
-    "explorer": "https://bscscan.com"
-  },
   "VICTION": {
     "name": "VICTION",
     "chain_type": "evm",
-    "url": "wss://viction.drpc.org",
+    "wss_urls": [
+      "wss://viction.drpc.org"
+    ],
     "address": "",
     "decimal": 18,
     "explorer": "https://vicscan.xyz"
@@ -18,15 +12,30 @@
   "ETHEREUM": {
     "name": "ETHEREUM",
     "chain_type": "evm",
-    "url": "wss://ethereum-rpc.publicnode.com",
+    "wss_urls": [
+      "wss://0xrpc.io/eth",
+      "wss://ethereum-rpc.publicnode.com",
+      "wss://mainnet.gateway.tenderly.co"
+    ],
     "address": "",
     "decimal": 18,
     "explorer": "https://etherscan.io"
   },
+  "BSC Mainnet": {
+    "name": "BSC Mainnet",
+    "chain_type": "evm",
+    "wss_urls": [
+      "wss://bsc-rpc.publicnode.com",
+      "wss://bsc.drpc.org"
+    ],
+    "address": "",
+    "decimal": 18,
+    "explorer": "https://bscscan.com"
+  },
   "SOLANA": {
     "name": "SOLANA",
     "chain_type": "solana",
-    "url": "wss://api.mainnet-beta.solana.com",
+    "wss_url": "wss://api.mainnet-beta.solana.com",
     "address": "",
     "decimal": 6,
     "explorer": "https://solscan.io"
