@@ -1,18 +1,20 @@
-use std::sync::Arc;
-use ethers::{abi::AbiDecode, providers::Middleware};
-use ethers::core::types::{ Filter, U256, Address};
-use ethers_providers::Provider;
-use ethers_providers::Ws;
-use ethers::prelude::*;
+use ethers::{
+    prelude::*,
+    abi::AbiDecode, 
+    providers::Middleware,
+    core::types::{ Filter, U256, Address},
+};
+use ethers_providers::{Provider, Ws};
 use tokio::sync::{mpsc, Mutex};
-use std::collections::{HashSet, HashMap};
+use std::{collections::{HashSet, HashMap},sync::Arc};
 use once_cell::sync::Lazy;
+use crate::RoundRobin;
 
 /// Global provider cache: one provider per WebSocket URL
 static PROVIDERS: Lazy<Mutex<HashMap<String, Arc<Provider<Ws>>>>> = 
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-// Struct representing a decoded ERC-20 Transfer event.
+/// Struct representing a decoded ERC-20 Transfer event.
 #[derive(Debug)]
 pub struct TransferEvent {
     pub from: Address,
@@ -36,7 +38,7 @@ impl Default for TransferEvent {
 
 
 /// Get or create a cached WebSocket provider for the given URL (singleton pattern per URL)
-async fn get_provider(url: &str) -> Result<Arc<Provider<Ws>>, Box<dyn std::error::Error>> {
+async fn get_provider(url: &str) -> Result<Arc<Provider<Ws>>, Box<dyn std::error::Error + Send + Sync>> {
     let mut providers = PROVIDERS.lock().await;
     
     // Check if we already have a provider for this URL
@@ -66,6 +68,59 @@ async fn remove_provider(url: &str) {
     }
 }
 
+/// Handle multiple WebSocket URLs with round-robin load balancing and retry
+pub async fn get_transfer_events_with_load_balancer(
+    selector: Arc<RoundRobin<String>>,
+    contract_address: &str,
+    decimal: u8,
+    explorer: Option<String>,
+    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    tx: mpsc::Sender<TransferEvent>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if selector.is_empty() {
+        return Err("No RPC URLs provided".into());
+    }
+    
+    let max_retries = selector.len() * 2; // Try each endpoint at least twice
+    
+    for attempt in 0..max_retries {
+        let current_url = match selector.next() {
+            Some(url) => url,
+            None => return Err("No URLs available".into()),
+        };
+        let endpoint_num = (attempt % selector.len()) + 1;
+        
+        println!("[Attempt {}/{}] Trying endpoint {}/{}: {}", 
+                 attempt + 1, max_retries, endpoint_num, selector.len(), current_url);
+        
+        match get_transfer_events(
+            &current_url,
+            contract_address,
+            decimal,
+            explorer.clone(),
+            Arc::clone(&sent_notifications),
+            tx.clone(),
+        ).await {
+            Ok(_) => {
+                // Connection ended normally, try next endpoint
+                println!("⚠️  Connection to {} ended, rotating to next endpoint...", current_url);
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => {
+                eprintln!("❌ Error on {}: {}. Trying next endpoint...", current_url, e);
+                // Note: We keep the provider in cache - it might work on next attempt
+                // If you want to force fresh connections on error, uncomment:
+                // remove_provider(&current_url).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        }
+    }
+    
+    Err("All endpoints exhausted after multiple retries".into())
+}
+
 /// Listens for Transfer events on the given contract and sends them through the channel.
 /// - `rpc`: WebSocket RPC URL for the blockchain node.
 /// - `contract_address`: Address of the token contract to monitor.
@@ -79,7 +134,7 @@ pub async fn get_transfer_events(
     explorer: Option<String>, 
     sent_notifications: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = get_provider(rpc).await?;
     let client = provider;
     
@@ -108,10 +163,23 @@ pub async fn get_transfer_events(
 
     // Process each log entry as it arrives.
     while let Some(log) = stream.next().await {
-        // topics[0] is the event signature, topics[1] is from, topics[2] is to
+        // Safely extract transaction data with error handling
+        if log.topics.len() < 3 {
+            eprintln!("⚠️  [{}] Invalid log: not enough topics", rpc);
+            continue; // Skip this event, keep listening
+        }
+        
         let from: Address = Address::from(log.topics[1]);
         let to: Address = Address::from(log.topics[2]);
-        let value: U256 = U256::decode(log.data.as_ref()).unwrap();
+        
+        let value: U256 = match U256::decode(log.data.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("⚠️  [{}] Failed to decode value: {}. Skipping event.", rpc, e);
+                continue; // Skip this event, keep listening
+            }
+        };
+        
         let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
         let notification_key = format!("{}:{}:{}:{}", from, to, value, tx_hash);
 
@@ -133,9 +201,10 @@ pub async fn get_transfer_events(
 
         // Send the transfer event to the channel
         if tx.send(transfer_event).await.is_err() {
-            eprintln!("Failed to send transfer event");
+            eprintln!("❌ [{}] Channel closed, ending stream", rpc);
+            break; // Channel closed, exit gracefully
         } else {
-            println!("🔍 Detected transaction: {}", tx_hash);
+            println!("🔍 [{}] Detected transaction: {}", rpc, tx_hash);
             // Mark this notification as sent
             let mut cache = sent_notifications.lock().await;
             cache.insert(notification_key);

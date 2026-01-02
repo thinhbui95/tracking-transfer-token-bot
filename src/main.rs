@@ -2,6 +2,7 @@ use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegra
 use tokio::{sync::{mpsc, Mutex}, select, signal::ctrl_c, time::{sleep, Duration, interval}};
 use std::{collections::HashSet, sync::{Mutex as StdMutex,Arc}, str::FromStr};
 use solana_sdk::pubkey::Pubkey;
+use tracking_transfer_token_bot::RoundRobin;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,7 +23,8 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match chain_type {
             "solana" => {
                 // Spawn Solana listener
-                let rpc_url = entry.url.clone();
+                let urls = entry.get_urls();
+                let rpc_url = urls.first().cloned().unwrap_or_default();
                 // For Solana, url can be either https:// (for RPC) or wss:// (for WebSocket)
                 // We need WebSocket for subscriptions, so convert if needed
                 let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
@@ -73,19 +75,39 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "evm" | _  => {
                 // Spawn EVM listener (default)
                 let tx = tx.clone();
-                let rpc_url = entry.url.clone();
+                let rpc_urls = entry.get_urls();
+                
+                if rpc_urls.is_empty() {
+                    eprintln!("[{}] No RPC URLs configured, skipping", entry.name);
+                    continue;
+                }
+                
                 let contract_address = entry.address.clone();
                 let name = entry.name.clone();
                 let decimal = entry.decimal;
                 let explorer = entry.explorer.clone();
+                
+                // Create persistent resources that survive reconnections
+                let selector = Arc::new(RoundRobin::new(rpc_urls.clone()));
                 let sent_notifications = Arc::new(Mutex::new(HashSet::<String>::new()));
+                
+                println!("[{}] EVM config: {} WebSocket endpoint(s), Contract={}", 
+                         name, rpc_urls.len(), contract_address);
                 
                 tokio::spawn(async move {
                     loop {
-                        println!("[{}] Starting EVM event listener...", name);
+                        println!("[{}] Starting EVM event listener with {} endpoint(s)...", name, selector.len());
                         let sent_notifications = Arc::clone(&sent_notifications);
-                        match get_event::get_transfer_events(&rpc_url, &contract_address, decimal, explorer.clone(),sent_notifications, tx.clone()).await {
-                            Ok(_) => println!("[{}] EVM stream ended normally", name),
+                        
+                        match get_event::get_transfer_events_with_load_balancer(
+                            Arc::clone(&selector),
+                            &contract_address,
+                            decimal,
+                            explorer.clone(),
+                            sent_notifications,
+                            tx.clone()
+                        ).await {
+                            Ok(_) => println!("[{}] All EVM endpoints exhausted", name),
                             Err(e) => eprintln!("[{}] EVM Error: {}. Reconnecting in 5s...", name, e),
                         }
                         sleep(Duration::from_secs(5)).await;

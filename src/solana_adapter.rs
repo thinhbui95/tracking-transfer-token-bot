@@ -12,7 +12,7 @@ use dotenv::from_path;
 use std::{ 
     error::Error, 
     str::FromStr, 
-    sync::{Arc, Mutex,atomic::{AtomicUsize, Ordering}}, 
+    sync::{Arc, Mutex}, 
     fs,
     collections::{HashMap, HashSet}
 };
@@ -22,10 +22,11 @@ use tokio::{
     time::{sleep, timeout, Duration},
 };
 use crate::send_message_to_telegram;
+use crate::RoundRobin;
 
 /// Global singleton rpc, semaphore instance, initialized once on first use
 static RPC_LIST: OnceCell<Arc<Vec<String>>> = OnceCell::new();
-static RPC_SELECTOR: OnceCell<Arc<RpcRoundRobin>> = OnceCell::new();
+static RPC_CLIENT_SELECTOR: OnceCell<Arc<RoundRobin<Arc<AsyncRpcClient>>>> = OnceCell::new();
 static REQUEST_SEMAPHORE: OnceCell<Arc<Semaphore>> = OnceCell::new();
 
 
@@ -38,11 +39,20 @@ fn get_rpc_list() -> Result<Arc<Vec<String>>, Box<dyn Error>> {
     }).map(Arc::clone)
 }
 
-/// Get or initialize the RPC round-robin selector (singleton pattern)
-fn get_rpc_selector() -> Result<Arc<RpcRoundRobin>, Box<dyn Error>> {
-    RPC_SELECTOR.get_or_try_init(|| {
+/// Get or initialize the RPC client selector (singleton pattern)
+fn get_rpc_client_selector() -> Result<Arc<RoundRobin<Arc<AsyncRpcClient>>>, Box<dyn Error>> {
+    RPC_CLIENT_SELECTOR.get_or_try_init(|| {
         let rpc_list = get_rpc_list()?;
-        Ok(Arc::new(RpcRoundRobin::new((*rpc_list).clone())))
+        let clients: Vec<Arc<AsyncRpcClient>> = rpc_list
+            .iter()
+            .map(|url| {
+                Arc::new(AsyncRpcClient::new_with_commitment(
+                    url.clone(),
+                    CommitmentConfig::confirmed(),
+                ))
+            })
+            .collect();
+        Ok(Arc::new(RoundRobin::new(clients)))
     }).map(Arc::clone)
 }
 
@@ -89,46 +99,6 @@ async fn send_solana_transfer_to_telegram(
     Ok(())
 }
 
-/// Round-robin RPC selector with client pooling for better performance
-pub struct RpcRoundRobin {
-    rpc_urls: Vec<String>,
-    clients: Vec<Arc<AsyncRpcClient>>,
-    counter: AtomicUsize,
-}
-
-impl RpcRoundRobin {
-    pub fn new(rpc_urls: Vec<String>) -> Self {
-        // Pre-create clients for connection pooling and reuse
-        let clients = rpc_urls
-            .iter()
-            .map(|url| {
-                Arc::new(AsyncRpcClient::new_with_commitment(
-                    url.clone(),
-                    CommitmentConfig::confirmed(),
-                ))
-            })
-            .collect();
-
-        Self {
-            rpc_urls,
-            clients,
-            counter: AtomicUsize::new(0),
-        }
-    }
-
-    /// Get next RPC URL using round-robin
-    pub fn next(&self) -> String {
-        let index = self.counter.fetch_add(1, Ordering::Relaxed) % self.rpc_urls.len();
-        self.rpc_urls[index].clone()
-    }
-
-    /// Get a client from the pool using round-robin (reuses connections)
-    pub fn get_client(&self) -> Arc<AsyncRpcClient> {
-        let index = self.counter.fetch_add(1, Ordering::Relaxed) % self.clients.len();
-        Arc::clone(&self.clients[index])
-    }
-}
-
 pub async fn get_detail_tx(
     rpc_url: String, 
     ws_url: String, 
@@ -141,10 +111,14 @@ pub async fn get_detail_tx(
     verified_accounts: Arc<Mutex<HashSet<String>>>,
     sent_notifications: Arc<Mutex<HashSet<String>>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Use singleton RPC selector and semaphore to avoid recreating on reconnections
-    let rpc_selector = get_rpc_selector().unwrap_or_else(|_| {
+    // Use singleton RPC client selector and semaphore to avoid recreating on reconnections
+    let rpc_client_selector = get_rpc_client_selector().unwrap_or_else(|_| {
         // Fallback: create a new selector with just the provided RPC URL
-        Arc::new(RpcRoundRobin::new(vec![rpc_url.to_string()]))
+        let client = Arc::new(AsyncRpcClient::new_with_commitment(
+            rpc_url.to_string(),
+            CommitmentConfig::confirmed(),
+        ));
+        Arc::new(RoundRobin::new(vec![client]))
     });
     let semaphore = get_request_semaphore();
     
@@ -169,7 +143,7 @@ pub async fn get_detail_tx(
                 }
             }
             
-            let rpc_selector = Arc::clone(&rpc_selector);
+            let rpc_client_selector = Arc::clone(&rpc_client_selector);
             let mint = mint.clone();
             let program_token_id = program_token_id.clone();
             let semaphore = Arc::clone(&semaphore);
@@ -197,10 +171,10 @@ pub async fn get_detail_tx(
                 let _permit = semaphore.acquire().await.unwrap();
                 
                 // Get a client from round-robin pool (reuses connections)
-                let client = rpc_selector.get_client();
+                let client = rpc_client_selector.next().expect("No RPC clients available");
                 
                 // Use timeout and retry logic for better resilience
-                if let Err(e) = get_info_transaction_with_retry(client, rpc_selector, &mint, decimal, &program_token_id, &sig_clone, verified_accounts, sent_notifications, explorer_clone).await {
+                if let Err(e) = get_info_transaction_with_retry(client, rpc_client_selector, &mint, decimal, &program_token_id, &sig_clone, verified_accounts, sent_notifications, explorer_clone).await {
                     eprintln!("Error processing transaction {}: {}", sig_clone, e);
                 }
                 
@@ -215,7 +189,7 @@ pub async fn get_detail_tx(
 /// Get transaction info with retry logic and timeout
 async fn get_info_transaction_with_retry(
     client: Arc<AsyncRpcClient>,
-    rpc_selector: Arc<RpcRoundRobin>,
+    rpc_client_selector: Arc<RoundRobin<Arc<AsyncRpcClient>>>,
     filter_account: &str,
     decimal: u8,
     token_program_id: &Pubkey,
@@ -232,7 +206,7 @@ async fn get_info_transaction_with_retry(
             client.clone()
         } else {
             // Try a different RPC on retry
-            rpc_selector.get_client()
+            rpc_client_selector.next().expect("No RPC clients available")
         };
         // Implement timeout for each attempt
         match timeout(
@@ -248,8 +222,7 @@ async fn get_info_transaction_with_retry(
             Ok(Err(e)) => return Err(e),
             Err(_) if attempt < max_retries => {
                 eprintln!("Timeout retry {}/{} for {}, trying next RPC...", attempt + 1, max_retries, tx_signature);
-                // Force advance to next RPC endpoint
-                let _ = rpc_selector.next();
+                // No need to force advance - next iteration will get next client automatically
                 sleep(Duration::from_millis(50)).await;
                 continue;
             }
@@ -459,14 +432,14 @@ mod tests {
             "https://rpc2.com".to_string(),
             "https://rpc3.com".to_string(),
         ];
-        let rr = RpcRoundRobin::new(rpc_urls.clone());
+        let rr = RoundRobin::new(rpc_urls.clone());
         
         // Test that it rotates through all URLs
-        assert_eq!(rr.next(), "https://rpc1.com");
-        assert_eq!(rr.next(), "https://rpc2.com");
-        assert_eq!(rr.next(), "https://rpc3.com");
-        assert_eq!(rr.next(), "https://rpc1.com"); // Should wrap around
-        assert_eq!(rr.next(), "https://rpc2.com");
+        assert_eq!(rr.next(), Some("https://rpc1.com".to_string()));
+        assert_eq!(rr.next(), Some("https://rpc2.com".to_string()));
+        assert_eq!(rr.next(), Some("https://rpc3.com".to_string()));
+        assert_eq!(rr.next(), Some("https://rpc1.com".to_string())); // Should wrap around
+        assert_eq!(rr.next(), Some("https://rpc2.com".to_string()));
     }
 
     // Test loading RPC list
