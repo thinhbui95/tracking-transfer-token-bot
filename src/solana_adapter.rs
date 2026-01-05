@@ -23,6 +23,7 @@ use tokio::{
 };
 use crate::send_message_to_telegram;
 use crate::RoundRobin;
+use crate::VerificationError;
 
 /// Global singleton rpc, semaphore instance, initialized once on first use
 static RPC_LIST: OnceCell<Arc<Vec<String>>> = OnceCell::new();
@@ -413,17 +414,6 @@ async fn verify_token_account_mint(
     }
 
     Ok(())
-}
-
-use thiserror::Error;
-#[derive(Error, Debug)]
-pub enum VerificationError {
-    #[error("RPC error: {0}")]
-    RpcError(#[from] solana_client::client_error::ClientError),
-    #[error("Invalid token account data")]
-    InvalidTokenAccount,
-    #[error("Token account does not belong to the specified mint")]
-    MintMismatch,
 }
 
 
