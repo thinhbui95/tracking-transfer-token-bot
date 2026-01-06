@@ -25,7 +25,7 @@ Edit `src/asset/config.json` to add or update networks:
   "BSC Mainnet": {
     "name": "BSC Mainnet",
     "chain_type": "evm",
-    "wsses": [
+    "wss_urls": [
       "wss://bsc-rpc.publicnode.com",
       "wss://bsc.drpc.org"
     ],
@@ -36,7 +36,7 @@ Edit `src/asset/config.json` to add or update networks:
   "VICTION": {
     "name": "VICTION",
     "chain_type": "evm",
-    "wsses": [
+    "wss_urls": [
       "wss://viction.drpc.org"
     ],
     "address": "",
@@ -46,7 +46,7 @@ Edit `src/asset/config.json` to add or update networks:
   "ETHEREUM": {
     "name": "ETHEREUM",
     "chain_type": "evm",
-    "wsses": [
+    "wss_urls": [
       "wss://0xrpc.io/eth",
       "wss://ethereum-rpc.publicnode.com",
       "wss://mainnet.gateway.tenderly.co"
@@ -58,7 +58,7 @@ Edit `src/asset/config.json` to add or update networks:
   "SOLANA": {
     "name": "SOLANA",
     "chain_type": "solana",
-    "wss": "wss://api.mainnet-beta.solana.com",
+    "wss_url": "wss://api.mainnet-beta.solana.com",
     "address": "",
     "decimal": 6,
     "explorer": "https://solscan.io"
