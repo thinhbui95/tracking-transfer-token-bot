@@ -1,5 +1,8 @@
 use thiserror::Error;
 use serde::{ Deserialize , Serialize };
+use ethers::core::types::Address;
+use ethers::prelude::*;
+
 #[derive(Error, Debug)]
 pub enum VerificationError {
     #[error("RPC error: {0}")]
@@ -50,6 +53,31 @@ pub struct Message {
     pub to: String,
     pub value: f64,
     pub tx_hash: String,
+    // Optional field for explorer URL
+    pub explorer: Option<String>,
+}
+
+/// Enum representing different types of blockchain transfers
+#[derive(Debug)]
+pub enum TransferType {
+    EVM {
+        from: Address,
+        to: Address,
+        value: f64,
+        tx_hash: H256,
+    },
+    Solana {
+        from: String,
+        to: String,
+        amount: f64,
+        tx_signature: String,
+    },
+}
+
+/// Struct representing the message to be sent to Telegram.
+#[derive(Debug)]
+pub struct MessageToSend {
+    pub transfer: TransferType,
     // Optional field for explorer URL
     pub explorer: Option<String>,
 }

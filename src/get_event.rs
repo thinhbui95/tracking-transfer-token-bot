@@ -5,7 +5,7 @@ use ethers::{
     core::types::{ Filter, U256, Address},
 };
 use ethers_providers::{Provider, Ws};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use std::{collections::{HashSet, HashMap},sync::Arc};
 use once_cell::sync::Lazy;
 use crate::RoundRobin;
@@ -74,7 +74,7 @@ pub async fn get_transfer_events_with_load_balancer(
     contract_address: &str,
     decimal: u8,
     explorer: Option<String>,
-    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    sent_notifications: Arc<RwLock<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if selector.is_empty() {
@@ -132,7 +132,7 @@ pub async fn get_transfer_events(
     contract_address: &str, 
     decimal: u8, 
     explorer: Option<String>, 
-    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    sent_notifications: Arc<RwLock<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = get_provider(wss).await?;
@@ -183,10 +183,11 @@ pub async fn get_transfer_events(
         let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
         let notification_key = format!("{}:{}:{}:{}", from, to, value, tx_hash);
 
+        // Quick check to skip already processed events (read lock - fast path)
         {
-            let cache = sent_notifications.lock().await;
+            let cache = sent_notifications.read().await;
             if cache.contains(&notification_key) {
-                continue; // Already sent, skip
+                continue; // Already processed, skip
             }
         }
 
@@ -203,17 +204,20 @@ pub async fn get_transfer_events(
         if tx.send(transfer_event).await.is_err() {
             eprintln!("❌ [{}] Channel closed, ending stream", wss);
             break; // Channel closed, exit gracefully
-        } else {
-            println!("🔍 [{}] Detected transaction: {}", wss, tx_hash);
-            // Mark this notification as sent
-            let mut cache = sent_notifications.lock().await;
+        }
+        
+        // Only mark as sent AFTER successful send to channel
+        {
+            let mut cache = sent_notifications.write().await;
             cache.insert(notification_key);
-
+            
             // Prevent cache from growing too large
             if cache.len() > 10000 {
                 cache.clear();
             }
         }
+        
+        println!("🔍 [{}] Detected transaction: {}", wss, tx_hash);
     }
     
     // Stream ended - remove provider from cache so it reconnects fresh

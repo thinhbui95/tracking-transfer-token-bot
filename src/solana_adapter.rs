@@ -7,12 +7,10 @@ use solana_commitment_config::CommitmentConfig;
 use solana_transaction_status::{UiTransactionEncoding, UiInstruction, UiParsedInstruction};
 use solana_sdk::pubkey::Pubkey;
 use spl_token::{ state::Account as TokenAccount, solana_program::program_pack::Pack };
-use teloxide::{requests::Requester, payloads::SendMessageSetters};
-use dotenv::from_path;
 use std::{ 
     error::Error, 
     str::FromStr, 
-    sync::{Arc, Mutex}, 
+    sync::Arc, 
     fs,
     collections::{HashMap, HashSet}
 };
@@ -24,23 +22,12 @@ use tokio::{
 use crate::send_message_to_telegram;
 use crate::RoundRobin;
 use crate::VerificationError;
+use crate::types::{ MessageToSend, TransferType };
 
 /// Global singleton rpc, semaphore instance, initialized once on first use
 static RPC_LIST: OnceCell<Arc<Vec<String>>> = OnceCell::new();
 static RPC_CLIENT_SELECTOR: OnceCell<Arc<RoundRobin<Arc<AsyncRpcClient>>>> = OnceCell::new();
 static REQUEST_SEMAPHORE: OnceCell<Arc<Semaphore>> = OnceCell::new();
-static CHAT_ID: OnceCell<i64> = OnceCell::new();
-
-/// Get or initialize the chat ID (singleton pattern)
-fn get_chat_id() -> Result<i64, Box<dyn Error>> {
-    CHAT_ID.get_or_try_init(|| {
-        from_path("src/asset/.env").ok();
-        let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-            .map_err(|_| "TELEGRAM_CHAT_ID not set")?.parse()
-            .map_err(|_| "Invalid TELEGRAM_CHAT_ID")?;
-        Ok(chat_id)
-    }).map(|id| *id)
-}
 
 /// Get or initialize the RPC list (singleton pattern)
 fn get_rpc_list() -> Result<Arc<Vec<String>>, Box<dyn Error>> {
@@ -75,7 +62,7 @@ fn get_request_semaphore() -> Arc<Semaphore> {
     }).clone()
 }
 
-/// Send Solana transfer notification to Telegram
+/// Send Solana transfer notification to Telegram using unified send_message function
 async fn send_solana_transfer_to_telegram(
     source: &str,
     destination: &str,
@@ -83,29 +70,17 @@ async fn send_solana_transfer_to_telegram(
     tx_signature: &str,
     explorer_url: Option<&str>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let explorer = explorer_url.unwrap_or("https://solscan.io");
+    let message = MessageToSend {
+        transfer: TransferType::Solana {
+            from: source.to_string(),
+            to: destination.to_string(),
+            amount,
+            tx_signature: tx_signature.to_string(),
+        },
+        explorer: explorer_url.map(|s| s.to_string()),
+    };
     
-    let source_link = format!(r#"<a href="{}/account/{}">{}...</a>"#, explorer, source, &source[..8]);
-    let dest_link = format!(r#"<a href="{}/account/{}">{}...</a>"#, explorer, destination, &destination[..8]);
-    let tx_link = format!(r#"<a href="{}/tx/{}">Detail</a>"#, explorer, tx_signature);
-
-    // Load environment variables for chat ID
-    let chat_id: i64 = get_chat_id().unwrap();
-
-    // Get the shared bot instance (created only once)
-    let bot = send_message_to_telegram::get_telegram_bot()?;
-
-    let text = format!(
-        "🟣 <b>Solana Transfer</b>\n\nFrom: {}\nTo: {}\n💰 Amount: {}\n📝 Tx: {}",
-        source_link, dest_link, amount, tx_link
-    );
-
-    bot.send_message(teloxide::types::ChatId(chat_id), text)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await
-        .map_err(|e| format!("Failed to send: {}", e))?;
-    
-    Ok(())
+    send_message_to_telegram::send_message(&message).await
 }
 
 pub async fn get_detail_tx(
@@ -117,8 +92,8 @@ pub async fn get_detail_tx(
     program_token_id: Pubkey,
     // Persistent caches that survive reconnections
     processed_txs: Arc<RwLock<HashMap<String, bool>>>,
-    verified_accounts: Arc<Mutex<HashSet<String>>>,
-    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    verified_accounts: Arc<RwLock<HashSet<String>>>,
+    sent_notifications: Arc<RwLock<HashSet<String>>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Use singleton RPC client selector and semaphore to avoid recreating on reconnections
     let rpc_client_selector = get_rpc_client_selector().unwrap_or_else(|_| {
@@ -203,8 +178,8 @@ async fn get_info_transaction_with_retry(
     decimal: u8,
     token_program_id: &Pubkey,
     tx_signature: &str,
-    verified_accounts: Arc<Mutex<HashSet<String>>>,
-    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    verified_accounts: Arc<RwLock<HashSet<String>>>,
+    sent_notifications: Arc<RwLock<HashSet<String>>>,
     explorer: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let max_retries = 5;
@@ -248,8 +223,8 @@ async fn get_info_transaction(
     decimal: u8, 
     token_program_id: &Pubkey, 
     tx_signature: &str,
-    verified_accounts: Arc<Mutex<HashSet<String>>>,
-    sent_notifications: Arc<Mutex<HashSet<String>>>,
+    verified_accounts: Arc<RwLock<HashSet<String>>>,
+    sent_notifications: Arc<RwLock<HashSet<String>>>,
     explorer: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let tx = client.get_transaction_with_config(
@@ -329,7 +304,7 @@ async fn get_info_transaction(
                 let source_cache_key = format!("{}:{}", source, filter_account);
                 let destination_cache_key = format!("{}:{}", destination, filter_account);
                 let is_verified = {
-                    let cache = verified_accounts.lock().unwrap();
+                    let cache = verified_accounts.read().await;
                     cache.contains(&source_cache_key) || cache.contains(&destination_cache_key)
                 };
                 
@@ -339,7 +314,7 @@ async fn get_info_transaction(
                         continue;
                     }
                     
-                    let mut cache = verified_accounts.lock().unwrap();
+                    let mut cache = verified_accounts.write().await;
                     cache.insert(source_cache_key);
                     cache.insert(destination_cache_key);
                     
@@ -355,7 +330,7 @@ async fn get_info_transaction(
                 // Check if we already sent this notification (prevent duplicates during retries)
                 let notification_key = format!("{}:{}:{}:{}", source, destination, amount, tx_signature);
                 {
-                    let cache = sent_notifications.lock().unwrap();
+                    let cache = sent_notifications.read().await;
                     if cache.contains(&notification_key) {
                         continue; // Already sent, skip
                     }
@@ -372,7 +347,7 @@ async fn get_info_transaction(
                     eprintln!("Failed to send Telegram notification: {}", e);
                 } else {
                     // Mark as sent
-                    let mut cache = sent_notifications.lock().unwrap();
+                    let mut cache = sent_notifications.write().await;
                     cache.insert(notification_key);
                     
                     // Prevent cache from growing too large
@@ -464,8 +439,8 @@ mod tests {
         
         // Create persistent caches for test
         let processed_txs = Arc::new(RwLock::new(HashMap::new()));
-        let verified_accounts = Arc::new(Mutex::new(HashSet::new()));
-        let sent_notifications = Arc::new(Mutex::new(HashSet::new()));
+        let verified_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let sent_notifications = Arc::new(RwLock::new(HashSet::new()));
         
         // Spawn the transaction monitoring in a task
         let monitor_task = tokio::spawn(async move {
@@ -494,8 +469,8 @@ mod tests {
         let decimal = 6;
         let tx_signature = "5RXcWBpMmY65wdXjFVkZttVGiRy5HwDUrKD1DQRFtwx1hctmxj3MqqydA2HiqKVLmXf9FZpUMsjpCqFFepJasMsj".to_string();
         let client = Arc::new(AsyncRpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed()));
-        let verified_accounts = Arc::new(Mutex::new(HashSet::new()));
-        let sent_notifications = Arc::new(Mutex::new(HashSet::new()));
+        let verified_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let sent_notifications = Arc::new(RwLock::new(HashSet::new()));
         let explorer = Some("https://solscan.io".to_string());
 
         let result = get_info_transaction(client, &mint, decimal, &token_program_id, &tx_signature, verified_accounts, sent_notifications, explorer).await;

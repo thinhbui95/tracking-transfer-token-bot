@@ -1,8 +1,8 @@
 use tracking_transfer_token_bot::{get_event, get_config, send_message_to_telegram, solana_adapter};
 use tokio::{sync::{mpsc, Mutex}, select, signal::ctrl_c, time::{sleep, Duration, interval}};
-use std::{collections::HashSet, sync::{Mutex as StdMutex,Arc}, str::FromStr};
+use std::{collections::HashSet, sync::Arc, str::FromStr};
 use solana_sdk::pubkey::Pubkey;
-use tracking_transfer_token_bot::RoundRobin;
+use tracking_transfer_token_bot::{RoundRobin, types::{MessageToSend, TransferType}};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,8 +42,8 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // Create persistent caches that survive reconnections
                 let processed_txs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<String, bool>::new()));
-                let verified_accounts = Arc::new(StdMutex::new(HashSet::<String>::new()));
-                let sent_notifications = Arc::new(StdMutex::new(HashSet::<String>::new()));
+                let verified_accounts = Arc::new(tokio::sync::RwLock::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(tokio::sync::RwLock::new(HashSet::<String>::new()));
                 
                 tokio::spawn(async move {
                     loop {
@@ -89,7 +89,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // Create persistent resources that survive reconnections
                 let selector = Arc::new(RoundRobin::new(wss_urls.clone()));
-                let sent_notifications = Arc::new(Mutex::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(tokio::sync::RwLock::new(HashSet::<String>::new()));
                 
                 println!("[{}] EVM config: {} WebSocket endpoint(s), Contract={}", 
                          name, wss_urls.len(), contract_address);
@@ -121,12 +121,8 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_workers = 8;
     let rx = Arc::new(Mutex::new(rx));
     
-    // Shared deduplication cache across all workers to prevent duplicates
-    let seen_hashes = Arc::new(StdMutex::new(HashSet::<String>::new()));
-    
     for worker_id in 0..num_workers {
         let rx = Arc::clone(&rx);
-        let seen_hashes = Arc::clone(&seen_hashes);
         tokio::spawn(async move {
             let mut batch: Vec<get_event::TransferEvent> = Vec::new();
             let mut batch_interval = interval(Duration::from_secs(2));
@@ -146,22 +142,6 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             break;
                         };
-                        
-                        let tx_hash_str = format!("{:#x}", event.tx_hash);
-                        
-                        // Deduplication: skip if already processed (shared across all workers)
-                        {
-                            let mut cache = seen_hashes.lock().unwrap();
-                            if cache.contains(&tx_hash_str) {
-                                continue;
-                            }
-                            cache.insert(tx_hash_str);
-                            
-                            // Limit dedup cache size
-                            if cache.len() > 1000 {
-                                cache.clear();
-                            }
-                        }
                         
                         batch.push(event);
                         
@@ -209,11 +189,13 @@ async fn send_batch(batch: &mut Vec<get_event::TransferEvent>, worker_id: usize)
     println!("[Worker {}] Processing batch of {} events", worker_id, batch.len());
     
     for event in batch.drain(..) {
-        let message = send_message_to_telegram::Message {
-            from: event.from,
-            to: event.to,
-            value: event.value,
-            tx_hash: event.tx_hash,
+        let message = MessageToSend {
+            transfer: TransferType::EVM {
+                from: event.from,
+                to: event.to,
+                value: event.value,
+                tx_hash: event.tx_hash,
+            },
             explorer: event.explorer.clone(),
         };
 
