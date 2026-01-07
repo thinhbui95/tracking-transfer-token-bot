@@ -5,7 +5,7 @@ use ethers::{
     core::types::{ Filter, U256, Address},
 };
 use ethers_providers::{Provider, Ws};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex};
 use std::{collections::{HashSet, HashMap},sync::Arc};
 use once_cell::sync::Lazy;
 use crate::RoundRobin;
@@ -74,7 +74,7 @@ pub async fn get_transfer_events_with_load_balancer(
     contract_address: &str,
     decimal: u8,
     explorer: Option<String>,
-    sent_notifications: Arc<RwLock<HashSet<String>>>,
+    sent_notifications: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if selector.is_empty() {
@@ -132,7 +132,7 @@ pub async fn get_transfer_events(
     contract_address: &str, 
     decimal: u8, 
     explorer: Option<String>, 
-    sent_notifications: Arc<RwLock<HashSet<String>>>,
+    sent_notifications: Arc<Mutex<HashSet<String>>>,
     tx: mpsc::Sender<TransferEvent>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = get_provider(wss).await?;
@@ -183,11 +183,18 @@ pub async fn get_transfer_events(
         let tx_hash: H256 = log.transaction_hash.unwrap_or_default();
         let notification_key = format!("{}:{}:{}:{}", from, to, value, tx_hash);
 
-        // Quick check to skip already processed events (read lock - fast path)
+        // Atomic check-and-insert to prevent race conditions
         {
-            let cache = sent_notifications.read().await;
+            let mut cache = sent_notifications.lock().await;
             if cache.contains(&notification_key) {
-                continue; // Already processed, skip
+                continue; // Already processed by another thread
+            }
+            // Mark immediately - no other thread can pass this point with same key
+            cache.insert(notification_key.clone());
+            
+            // Prevent cache from growing too large
+            if cache.len() > 10000 {
+                cache.clear();
             }
         }
 
@@ -202,19 +209,13 @@ pub async fn get_transfer_events(
 
         // Send the transfer event to the channel
         if tx.send(transfer_event).await.is_err() {
+            // Rollback: Remove from cache so we can retry when connection recovers
+            {
+                let mut cache = sent_notifications.lock().await;
+                cache.remove(&notification_key);
+            }
             eprintln!("❌ [{}] Channel closed, ending stream", wss);
             break; // Channel closed, exit gracefully
-        }
-        
-        // Only mark as sent AFTER successful send to channel
-        {
-            let mut cache = sent_notifications.write().await;
-            cache.insert(notification_key);
-            
-            // Prevent cache from growing too large
-            if cache.len() > 10000 {
-                cache.clear();
-            }
         }
         
         println!("🔍 [{}] Detected transaction: {}", wss, tx_hash);

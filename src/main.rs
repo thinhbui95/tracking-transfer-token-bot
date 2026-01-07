@@ -89,7 +89,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // Create persistent resources that survive reconnections
                 let selector = Arc::new(RoundRobin::new(wss_urls.clone()));
-                let sent_notifications = Arc::new(tokio::sync::RwLock::new(HashSet::<String>::new()));
+                let sent_notifications = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
                 
                 println!("[{}] EVM config: {} WebSocket endpoint(s), Contract={}", 
                          name, wss_urls.len(), contract_address);
