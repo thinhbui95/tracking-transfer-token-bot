@@ -119,19 +119,27 @@ pub async fn get_detail_tx(
     while let Ok(logs) = receiver.recv() {
         let signature = logs.value.signature;
         if !signature.is_empty() && logs.value.err.is_none() {
-            // Quick check for duplicates
-            {
-                let cache = processed_txs.read().await;
-                if cache.contains_key(&signature) {
-                    continue; // Skip already processed transactions
+            // Atomic check-and-insert BEFORE spawning to prevent race conditions
+            let already_processed = {
+                let mut cache = processed_txs.write().await;
+                
+                // Limit cache size before checking
+                if cache.len() >= 10000 {
+                    cache.clear();
                 }
+                
+                // Insert returns Some(old_value) if key existed, None if new
+                cache.insert(signature.clone(), true).is_some()
+            };
+            
+            if already_processed {
+                continue; // Skip already processed transactions
             }
             
             let rpc_client_selector = Arc::clone(&rpc_client_selector);
             let mint = mint.clone();
             let program_token_id = program_token_id.clone();
             let semaphore = Arc::clone(&semaphore);
-            let processed_txs = Arc::clone(&processed_txs);
             let verified_accounts = Arc::clone(&verified_accounts);
             let sent_notifications = Arc::clone(&sent_notifications);
             let explorer_clone = explorer.clone();
@@ -139,17 +147,6 @@ pub async fn get_detail_tx(
                         
             // Spawn task with rate limiting
             tokio::spawn(async move {
-                // Mark as processing
-                {
-                    let mut cache = processed_txs.write().await;
-                    if cache.insert(sig_clone.clone(), true).is_some() {
-                        return; // Already being processed
-                    }
-                    // Limit cache size
-                    if cache.len() > 10000 {
-                        cache.clear();
-                    }
-                }
                 
                 // Acquire permit before making RPC calls
                 let _permit = semaphore.acquire().await.unwrap();
@@ -327,35 +324,36 @@ async fn get_info_transaction(
                 // Calculate amount value
                 let amount_value = amount as f64 / 10f64.powi(decimal as i32);
                 
-                // Check if we already sent this notification (prevent duplicates during retries)
+                // Atomic check-and-insert to prevent duplicate notifications
                 let notification_key = format!("{}:{}:{}:{}", source, destination, amount, tx_signature);
-                {
-                    let cache = sent_notifications.read().await;
-                    if cache.contains(&notification_key) {
-                        continue; // Already sent, skip
-                    }
-                }
-                
-                // Send to Telegram
-                if let Err(e) = send_solana_transfer_to_telegram(
-                    source,
-                    destination,
-                    amount_value,
-                    tx_signature,
-                    explorer.as_deref(),
-                ).await {
-                    eprintln!("Failed to send Telegram notification: {}", e);
-                } else {
-                    // Mark as sent
+                let should_send = {
                     let mut cache = sent_notifications.write().await;
-                    cache.insert(notification_key);
                     
                     // Prevent cache from growing too large
-                    if cache.len() > 10000 {
+                    if cache.len() >= 10000 {
                         cache.clear();
                     }
-                    println!("Detected transaction: {}", tx_signature);
-                    println!("✅ Sent: {} -> {} | {} ", &source[..8], &destination[..8], amount_value);
+                    
+                    cache.insert(notification_key.clone()) // true if newly inserted, false if already existed
+                };
+                
+                // Only send if we successfully claimed this notification
+                if should_send {
+                    if let Err(e) = send_solana_transfer_to_telegram(
+                        source,
+                        destination,
+                        amount_value,
+                        tx_signature,
+                        explorer.as_deref(),
+                    ).await {
+                        eprintln!("Failed to send Telegram notification: {}", e);
+                        // Remove from cache on failure so it can be retried
+                        let mut cache = sent_notifications.write().await;
+                        cache.remove(&notification_key);
+                    } else {
+                        println!("Detected transaction: {}", tx_signature);
+                        println!("✅ Sent: {} -> {} | {} ", &source[..8], &destination[..8], amount_value);
+                    }
                 }
             }
         }
